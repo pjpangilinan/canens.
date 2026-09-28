@@ -12,9 +12,8 @@ data is worth having somewhere other than your browser profile.
 | --- | --- |
 | `web/` | Next.js static export. Dexie over IndexedDB is the store. |
 | `backend/` | FastAPI. Four routes, an AI proxy and a backup sink. |
-| `docs/adr/` | Architecture decisions, one sequence, with status. |
-| `.scratch/` | Specs and tickets. See `docs/agents/issue-tracker.md`. |
-| `CONTEXT.md` | Domain vocabulary. Read this first. |
+| `infrastructure/` | The SAM template for the production stack. See its README. |
+| `verify.ps1` | One command that runs every check, including the billable ones. |
 
 ## Running it
 
@@ -75,8 +74,11 @@ API, and the workflow fails if the latter is missing rather than shipping a
 page that points at `localhost:8000`. All three are inlined at build time.
 
 `backend/` is a Docker image for Lambda behind API Gateway, with Postgres on
-RDS. It expects `bedrock:InvokeModel` on its execution role; there is no
-credential to configure.
+RDS. The stack that builds all of that is in `infrastructure/`; read
+`infrastructure/README.md` before changing it, because the cost and the network
+layout are both deliberate and the reasons are not obvious from the template.
+It expects `bedrock:InvokeModel` on its execution role; there is no credential
+to configure.
 
 **Run migrations before deploying.** Nothing applies them automatically, so a
 fresh database has no tables and the first request fails:

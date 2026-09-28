@@ -1,0 +1,10 @@
+version = 0.1
+
+[default.build.parameters]
+warm_containers = "DISABLED"
+
+[default.deploy.parameters]
+stack_name = "canens-prod"
+region = "us-east-1"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"

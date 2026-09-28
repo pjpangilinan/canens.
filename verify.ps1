@@ -2,7 +2,7 @@ param(
   [switch]$SkipAI
 )
 
-$root = "D:\Here\canens"
+$root = $PSScriptRoot
 $failures = New-Object System.Collections.Generic.List[string]
 
 # Each step is run as a command string so that a non-zero exit code is read

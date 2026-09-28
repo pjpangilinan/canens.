@@ -32,7 +32,7 @@ blob-report/
 
 # Tooling scratch
 .serena/
-.scratch/e2e/
+.scratch/
 
 # IDE / Editor
 .claude/
