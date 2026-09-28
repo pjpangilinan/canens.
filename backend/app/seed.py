@@ -18,7 +18,9 @@ from app.models import User
 
 
 async def seed() -> None:
-    command.upgrade(Config("alembic.ini"), "head")
+    # Alembic's env.py calls asyncio.run() itself, so it cannot be invoked
+    # from inside a running loop. Hand it to a thread, which has none.
+    await asyncio.to_thread(command.upgrade, Config("alembic.ini"), "head")
 
     async with SessionLocal() as session:
         user_id = uuid.UUID(MVP_USER_ID)

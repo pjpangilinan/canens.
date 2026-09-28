@@ -1,4 +1,4 @@
-# Secrets - backend/.env holds GROQ/Bedrock credentials and must never be committed.
+# Secrets - backend/.env holds the database URL and must never be committed.
 # Keep .env.example tracked.
 .env
 .env.local
@@ -42,3 +42,11 @@ blob-report/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local verification output
+verify.log
+verify.err
+
+# Next.js dev server output
+web/dev.log
+web/dev.err

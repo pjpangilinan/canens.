@@ -1,14 +1,15 @@
-"""The AI routes are a proxy, and must stay that way.
+"""The AI routes are a proxy, and must stay that one.
 
 The previous spec required asserting that requesting next steps does not
 trigger generation by itself. That test was never written. It is cheap to
-assert here because the route has no database dependency at all, so the
-absence of persistence is structural rather than a promise.
+assert here because neither route writes a goal or a task; the only thing
+they persist is the call counted against the daily cap.
 """
 import pytest
 
+from app.config import settings
 from app.routers import ai
-from app.services.bedrock import NextSteps, ProposedTask, ProviderError, StarterGoals
+from app.services.bedrock import ProviderError
 
 pytestmark = pytest.mark.asyncio
 
@@ -43,12 +44,7 @@ def stub(monkeypatch):
 
 
 async def test_next_steps_returns_proposed_tasks(async_client, stub):
-    stub(
-        NextSteps(
-            status="more",
-            tasks=[ProposedTask(title="Draft the outline"), ProposedTask(title="Review it")],
-        )
-    )
+    stub({"status": "more", "tasks": ["Draft the outline", "Review it"]})
 
     response = await async_client.post(
         "/api/goals/next-steps",
@@ -59,13 +55,11 @@ async def test_next_steps_returns_proposed_tasks(async_client, stub):
     )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "more"
-    assert [t["title"] for t in body["tasks"]] == ["Draft the outline", "Review it"]
+    assert response.json() == {"status": "more", "tasks": ["Draft the outline", "Review it"]}
 
 
 async def test_next_steps_passes_existing_tasks_through(async_client, stub):
-    installed = stub(NextSteps(status="more", tasks=[ProposedTask(title="Next")]))
+    installed = stub({"status": "more", "tasks": ["Next"]})
 
     await async_client.post(
         "/api/goals/next-steps",
@@ -80,13 +74,13 @@ async def test_next_steps_passes_existing_tasks_through(async_client, stub):
     assert existing == [{"title": "One thing", "status": "Pending"}]
 
 
-async def test_next_steps_does_not_persist_anything(async_client, stub, db_session):
-    """Generation is a proposal. Nothing is written until the user accepts it."""
+async def test_next_steps_writes_no_domain_rows(async_client, stub, db_session):
+    """Generation is a proposal. Nothing is saved until the user accepts it."""
     from sqlalchemy import func, select
 
     from app.models import Goal, Task
 
-    stub(NextSteps(status="more", tasks=[ProposedTask(title="Do the thing")]))
+    stub({"status": "more", "tasks": ["Do the thing"]})
 
     response = await async_client.post(
         "/api/goals/next-steps", json={"goal_title": "Never stored"}
@@ -113,24 +107,80 @@ async def test_provider_failure_is_surfaced_not_substituted(async_client, stub):
 
 
 async def test_done_status_is_reported_for_the_user_to_confirm(async_client, stub):
-    stub(NextSteps(status="done", tasks=[]))
+    stub({"status": "done", "tasks": []})
 
     response = await async_client.post(
         "/api/goals/next-steps", json={"goal_title": "Already finished"}
     )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "done"
-    assert body["tasks"] == []
+    assert response.json() == {"status": "done", "tasks": []}
 
 
 async def test_starter_goals_returns_titles(async_client, stub):
-    stub(StarterGoals(goals=[ProposedTask(title="Run a marathon")]))
+    stub({"goals": ["Run a marathon"]})
 
     response = await async_client.post(
         "/api/onboarding/starter-goals", json={"answers": "I want to get fit"}
     )
 
     assert response.status_code == 200
-    assert response.json() == {"goals": [{"title": "Run a marathon"}]}
+    assert response.json() == {"goals": ["Run a marathon"]}
+
+
+class TestDailyCap:
+    """The endpoint is public and each call costs money, so the ceiling is in
+    the application rather than relying on a budget alarm alone."""
+
+    async def test_calls_below_the_cap_are_allowed(self, async_client, stub, monkeypatch):
+        stub({"status": "more", "tasks": ["Step"]})
+
+        for _ in range(3):
+            response = await async_client.post(
+                "/api/goals/next-steps", json={"goal_title": "Anything"}
+            )
+            assert response.status_code == 200
+
+    async def test_calls_beyond_the_cap_are_refused(self, async_client, stub, monkeypatch):
+        monkeypatch.setattr(settings, "ai_daily_cap", 2)
+        installed = stub({"status": "more", "tasks": ["Step"]})
+
+        for _ in range(2):
+            response = await async_client.post(
+                "/api/goals/next-steps", json={"goal_title": "Anything"}
+            )
+            assert response.status_code == 200
+
+        refused = await async_client.post(
+            "/api/goals/next-steps", json={"goal_title": "Anything"}
+        )
+        assert refused.status_code == 429
+        assert "limit reached" in refused.json()["detail"]
+
+        # The refused call must not have reached the model.
+        assert len(installed.calls) == 2
+
+    async def test_the_cap_can_be_disabled(self, async_client, stub, monkeypatch):
+        monkeypatch.setattr(settings, "ai_daily_cap", 0)
+        stub({"status": "more", "tasks": ["Step"]})
+
+        for _ in range(5):
+            response = await async_client.post(
+                "/api/goals/next-steps", json={"goal_title": "Anything"}
+            )
+            assert response.status_code == 200
+
+    async def test_usage_is_recorded_against_today(self, async_client, stub, db_session):
+        from datetime import date
+
+        from sqlalchemy import select
+
+        from app.models import AiUsage
+
+        stub({"status": "more", "tasks": ["Step"]})
+        await async_client.post("/api/goals/next-steps", json={"goal_title": "Anything"})
+
+        rows = (await db_session.execute(select(AiUsage))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].calls == 1
+        assert rows[0].day == date.today()

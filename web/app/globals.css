@@ -8,17 +8,12 @@
   --color-foreground: #F9FAFB;
   --color-muted: #9CA3AF;
 
-  --font-headline: 'Space Grotesk', sans-serif;
-  --font-body: 'Inter', sans-serif;
-
-  --spacing-unit: 8px;
-
   --shadow-glass: 0 4px 30px rgba(0, 0, 0, 0.1);
-  --radius-xl: 12px;
 }
 
-body {
-  background: var(--color-background);
-  color: var(--color-foreground);
-  font-family: var(--font-body);
-}
+/*
+ * --font-headline was previously declared here as 'Space Grotesk' but the
+ * font was never loaded, so every headline silently fell back to the default
+ * sans. The token is dropped rather than wired up: the app has one typeface
+ * and does not need a second.
+ */

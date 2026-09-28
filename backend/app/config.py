@@ -1,3 +1,4 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +15,9 @@ class Settings(BaseSettings):
     bedrock_max_tokens: int = 1024
     bedrock_timeout_seconds: float = 20.0
 
+    # Hard ceiling on model calls per user per day. Set to 0 to disable.
+    ai_daily_cap: int = 200
+
     # Comma-separated list of exact origins permitted to call the API.
     allowed_origins: str = "http://localhost:3000"
 
@@ -21,8 +25,13 @@ class Settings(BaseSettings):
     # routes. This is not real authentication: the value is inlined into the
     # client bundle, so anyone who can load the page has it. It exists to stop
     # casual abuse of a public endpoint, not to resist an attacker. Pair it
-    # with API Gateway throttling and an account-level spend limit.
+    # with the daily call cap and an account-level spend limit.
+    #
+    # It is required when APP_ENV is "production" and optional otherwise, so a
+    # deployment that forgets to set it fails at startup rather than quietly
+    # serving an unauthenticated, billable endpoint to the internet.
     api_token: str | None = None
+    app_env: str = "development"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -31,6 +40,15 @@ class Settings(BaseSettings):
         # provider cannot stop the application from starting.
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def _token_required_in_production(self) -> "Settings":
+        if self.app_env.lower() == "production" and not self.api_token:
+            raise ValueError(
+                "API_TOKEN must be set when APP_ENV=production. Without it the AI "
+                "and backup routes are unauthenticated and billable."
+            )
+        return self
 
     @property
     def origin_list(self) -> list[str]:

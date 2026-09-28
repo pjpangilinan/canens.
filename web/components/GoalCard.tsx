@@ -1,266 +1,506 @@
-import React, { useState } from 'react';
-import { Task, createTask, updateTask, deleteTask as apiDeleteTask, generateNextSteps } from '../lib/api';
-import { GoalStatus, TaskStatus } from '../lib/db';
+"use client";
+
+import { useState } from "react";
+import { Goal, GoalStatus, Task, TaskStatus } from "../lib/db";
+import { fetchNextSteps } from "../lib/api";
+import * as store from "../lib/store";
+import { flushBackupNow } from "../lib/backup";
 
 interface GoalCardProps {
-  id: string;
-  title: string;
-  status: string;
-  tasks?: Task[];
-  searchQuery?: string;
-  onDelete?: (id: string) => void;
-  onComplete?: (id: string) => void;
-  onTaskComplete?: (taskId: string) => void;
+  goal: Goal;
+  tasks: Task[];
+  /** Ids of tasks matching the current search, for highlighting. */
+  matchingTaskIds: Set<string>;
+  /** Expand on mount because a task inside matched the search. */
+  startExpanded: boolean;
+  onChanged: () => void;
+  onError: (message: string) => void;
 }
 
-export default function GoalCard({ id, title, status, tasks = [], searchQuery = '', onDelete, onComplete, onTaskComplete }: GoalCardProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [isAddingTask, setIsAddingTask] = useState(false);
-  const [newTaskTitle, setNewTaskTitle] = useState('');
+export default function GoalCard({
+  goal,
+  tasks,
+  matchingTaskIds,
+  startExpanded,
+  onChanged,
+  onError,
+}: GoalCardProps) {
+  // null means "the user has not said", so a card follows whatever the search
+  // asks for until they touch it. Reading startExpanded only in useState meant
+  // it applied on mount, so a card already on screen when the user typed never
+  // expanded and the goal matched for no visible reason.
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
+  const expanded = userExpanded ?? startExpanded;
+  const [renamingGoal, setRenamingGoal] = useState(false);
+  const [goalTitle, setGoalTitle] = useState(goal.title);
+  const [addingTask, setAddingTask] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState("");
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
-  const [editTaskTitle, setEditTaskTitle] = useState('');
-  const [localTasks, setLocalTasks] = useState<Task[]>(tasks);
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [editTaskTitle, setEditTaskTitle] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState<string | null>(null);
+  const [confirmRegenerate, setConfirmRegenerate] = useState(false);
 
-  // Filter out completed tasks
-  const activeTasks = localTasks.filter(t => t.status !== TaskStatus.COMPLETED);
-  const isCompleted = status === GoalStatus.COMPLETED;
+  const isCompleted = goal.status === GoalStatus.COMPLETED;
+  const outstanding = tasks.filter((t) => t.status !== TaskStatus.COMPLETED);
+  const done = tasks.filter((t) => t.status === TaskStatus.COMPLETED);
 
-  // When tasks prop changes (e.g. from websocket or refresh), update local tasks
-  React.useEffect(() => {
-    setLocalTasks(tasks);
-  }, [tasks]);
+  const toggleExpanded = () => setUserExpanded(!expanded);
 
-  React.useEffect(() => {
-    if (searchQuery.trim() && localTasks.some(t => t.title.toLowerCase().includes(searchQuery.toLowerCase()))) {
-      setIsExpanded(true);
-    }
-  }, [searchQuery, localTasks]);
+  const announce = () => onChanged();
 
-  const handleAddTask = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newTaskTitle.trim()) return;
-    
+  async function run(action: () => Promise<unknown>, context: string) {
     try {
-      const newTask = await createTask(id, newTaskTitle, 30);
-      setLocalTasks(prev => [...prev, newTask]);
-      setNewTaskTitle('');
-      setIsAddingTask(false);
-    } catch (err) {
-      console.error('Failed to create task', err);
+      await action();
+      announce();
+    } catch (error) {
+      onError(`${context}: ${(error as Error).message}`);
     }
-  };
+  }
 
-  const handleGenerateNextSteps = async () => {
-    setIsGenerating(true);
-    try {
-      const currentTasks = localTasks.map(t => ({ title: t.title, status: t.status }));
-      const res = await generateNextSteps(id, currentTasks);
-      
-      if (res.is_completed && onComplete) {
-        onComplete(id);
-      } else if (res.tasks && res.tasks.length > 0) {
-        const newLocalTasks: Task[] = [];
-        for (const t of res.tasks) {
-          const newTask = await createTask(id, t.title, t.estimated_minutes);
-          newLocalTasks.push(newTask);
-        }
-        setLocalTasks(prev => [...prev, ...newLocalTasks]);
+  /** Steps the model proposed, appended. Never replaces: the user curates. */
+  async function applyProposal(titles: string[]) {
+    let added = 0;
+    for (const title of titles) {
+      try {
+        await store.createTask(goal.id, title);
+        added += 1;
+      } catch (error) {
+        // The goal may have been completed or deleted while the model was
+        // thinking. Say so rather than dropping the rest silently.
+        onError(`Could not add a step: ${(error as Error).message}`);
+        break;
       }
-    } catch (err) {
-      console.error('Failed to generate tasks', err);
+    }
+    if (added > 0) {
+      setUserExpanded(true);
+      announce();
+    }
+  }
+
+  async function saveGoalTitle() {
+    const title = goalTitle.trim();
+    setRenamingGoal(false);
+    if (!title || title === goal.title) {
+      setGoalTitle(goal.title);
+      return;
+    }
+
+    try {
+      await store.renameGoal(goal.id, title);
+      announce();
+    } catch (error) {
+      setGoalTitle(goal.title);
+      onError(`Could not rename the goal: ${(error as Error).message}`);
+      return;
+    }
+
+    // The breakdown was written against the old wording, so offer fresh steps
+    // for the new one. This appends; existing steps are left alone.
+    setConfirmRegenerate(true);
+  }
+
+  async function generate() {
+    setGenerating(true);
+    try {
+      const result = await fetchNextSteps(
+        goal.title,
+        tasks.map((t) => ({ title: t.title, status: t.status })),
+      );
+
+      if (result.status === "done") {
+        // Archiving removes the goal from the active list, so the model
+        // proposes it and the user decides.
+        setConfirmArchive("The model thinks this goal is done.");
+        return;
+      }
+
+      await applyProposal(result.tasks);
+    } catch (error) {
+      onError(`Could not generate next steps: ${(error as Error).message}`);
     } finally {
-      setIsGenerating(false);
+      setGenerating(false);
     }
-  };
+  }
 
-  const handleSaveEdit = async (taskId: string) => {
-    if (!editTaskTitle.trim()) return;
-    try {
-      const updated = await updateTask(taskId, { title: editTaskTitle });
-      setLocalTasks(prev => prev.map(t => t.id === taskId ? updated : t));
-      setEditingTaskId(null);
-    } catch (err) {
-      console.error('Failed to update task', err);
-    }
-  };
-
-  const handleDeleteTask = async (taskId: string) => {
-    try {
-      await apiDeleteTask(taskId);
-      setLocalTasks(prev => prev.filter(t => t.id !== taskId));
-    } catch (err) {
-      console.error('Failed to delete task', err);
-    }
-  };
-
-  const handleComplete = async (taskId: string) => {
-    // Optimistic UI update
-    setLocalTasks(prev => prev.filter(t => t.id !== taskId));
-    if (onTaskComplete) {
-      await onTaskComplete(taskId);
-    }
-  };
+  async function toggleTask(task: Task) {
+    const next =
+      task.status === TaskStatus.COMPLETED ? TaskStatus.PENDING : TaskStatus.COMPLETED;
+    await run(() => store.setTaskStatus(task.id, next), "Could not update the task");
+  }
 
   return (
     <div className="bg-surface border border-primary/20 shadow-glass rounded-xl overflow-hidden transition-all duration-300">
-      <div 
-        className="p-6 cursor-pointer hover:bg-primary/5 flex justify-between items-start group"
-        onClick={() => setIsExpanded(!isExpanded)}
-      >
-        <div className="flex items-center space-x-3">
-          <button className="text-muted group-hover:text-primary transition-colors">
-            <svg className={`w-5 h-5 transform transition-transform duration-300 ${isExpanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
-          </button>
-          <h3 className="text-xl font-semibold text-foreground group-hover:text-white transition-colors duration-300">
-            {title}
+      <div className="p-6 flex justify-between items-start gap-4">
+        {/*
+          The input is a sibling of the toggle, not a child of it. A button
+          may only contain phrasing content, and nesting a text field inside
+          one makes the toggle's accessible name change as you type, so a
+          screen reader announces a field inside a button.
+        */}
+        {renamingGoal ? (
+          <input
+            autoFocus
+            value={goalTitle}
+            onChange={(e) => setGoalTitle(e.target.value)}
+            onBlur={saveGoalTitle}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void saveGoalTitle();
+              if (e.key === "Escape") {
+                setGoalTitle(goal.title);
+                setRenamingGoal(false);
+              }
+            }}
+            className="flex-1 min-w-0 bg-black/50 border border-primary/50 rounded px-2 py-1 text-xl text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            aria-label={`Rename "${goal.title}"`}
+          />
+        ) : (
+          <h3 className="flex-1 min-w-0 text-xl font-semibold text-foreground">
+            <button
+              onClick={toggleExpanded}
+              aria-expanded={expanded}
+              // Names the action, not just the goal. A button whose name is
+              // only the goal's title says nothing about what pressing it does.
+              aria-label={`${expanded ? "Collapse" : "Expand"} ${goal.title}`}
+              className="flex items-center space-x-3 text-left w-full group"
+            >
+              <svg
+                className={`w-5 h-5 shrink-0 text-muted transition-transform duration-300 ${expanded ? "rotate-180" : ""}`}
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+              <span className="truncate group-hover:text-white transition-colors">{goal.title}</span>
+            </button>
           </h3>
-        </div>
-        <div className="flex items-center space-x-3" onClick={e => e.stopPropagation()}>
-          <span className={`px-3 py-1 rounded-full text-sm font-medium whitespace-nowrap ml-4 ${isCompleted ? 'bg-green-500/20 text-green-400' : 'bg-primary/20 text-primary-light'}`}>
-            {status}
+        )}
+
+        <div className="flex items-center space-x-3 shrink-0">
+          <span
+            className={`px-3 py-1 rounded-full text-sm font-medium whitespace-nowrap ${
+              isCompleted ? "bg-green-500/20 text-green-400" : "bg-primary/20 text-primary-light"
+            }`}
+          >
+            {goal.status}
           </span>
-          {!isCompleted && onComplete && (
-            <button onClick={() => onComplete(id)} className="text-green-500/70 hover:text-green-500 transition-colors" title="Complete Goal">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-              </svg>
-            </button>
+
+          {!isCompleted && (
+            <>
+              <button
+                onClick={() => {
+                  setGoalTitle(goal.title);
+                  setRenamingGoal(true);
+                }}
+                disabled={generating}
+                className="text-muted hover:text-primary transition-colors disabled:opacity-40"
+                title="Rename goal"
+                aria-label={`Rename "${goal.title}"`}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                  />
+                </svg>
+              </button>
+
+              <button
+                onClick={() =>
+                  void run(() => store.archiveGoal(goal.id), "Could not complete the goal")
+                }
+                // Generating writes steps, and a step on an archived goal is
+                // invisible. The model call is asynchronous, so the race is
+                // real rather than theoretical.
+                disabled={generating}
+                className="text-green-500/70 hover:text-green-500 transition-colors disabled:opacity-40"
+                title="Complete goal"
+                aria-label="Complete goal"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path
+                    fillRule="evenodd"
+                    d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              </button>
+            </>
           )}
-          {onDelete && (
-            <button onClick={() => onDelete(id)} className="text-red-500/70 hover:text-red-500 transition-colors" title="Delete Goal">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
-              </svg>
-            </button>
-          )}
+
+          <button
+            onClick={() => {
+              // Destructive, so do not leave the server holding a snapshot
+              // that still contains what was just removed.
+              flushBackupNow();
+              void run(() => store.deleteGoal(goal.id), "Could not delete the goal");
+            }}
+            disabled={generating}
+            className="text-red-500/70 hover:text-red-500 transition-colors disabled:opacity-40"
+            title="Delete goal"
+            aria-label={`Delete "${goal.title}"`}
+          >
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
         </div>
       </div>
-      
-      {isExpanded && (
-        <div className="px-6 pb-6 pt-2 border-t border-white/5 bg-black/20">
+
+      {confirmRegenerate && (
+        <div className="px-6 py-4 border-t border-white/5 bg-primary/10 flex flex-wrap items-center gap-3">
+          <p className="text-sm text-foreground flex-1 min-w-[12rem]">
+            The steps were written for the old title. Generate more for &ldquo;{goal.title}&rdquo;?
+          </p>
+          <button
+            onClick={() => {
+              setConfirmRegenerate(false);
+              void generate();
+            }}
+            className="text-sm bg-primary text-white px-3 py-1.5 rounded hover:bg-primary-light"
+          >
+            Generate steps
+          </button>
+          <button
+            onClick={() => setConfirmRegenerate(false)}
+            className="text-sm text-muted hover:text-white px-3 py-1.5 rounded"
+          >
+            Not now
+          </button>
+        </div>
+      )}
+
+      {confirmArchive && (
+        <div className="px-6 py-4 border-t border-white/5 bg-primary/10 flex flex-wrap items-center gap-3">
+          <p className="text-sm text-foreground flex-1 min-w-[12rem]">
+            {confirmArchive} Complete it and move it to your Activity Log?
+          </p>
+          <button
+            onClick={() => {
+              setConfirmArchive(null);
+              void run(() => store.archiveGoal(goal.id), "Could not complete the goal");
+            }}
+            className="text-sm bg-primary text-white px-3 py-1.5 rounded hover:bg-primary-light"
+          >
+            Complete goal
+          </button>
+          <button
+            onClick={() => setConfirmArchive(null)}
+            className="text-sm text-muted hover:text-white px-3 py-1.5 rounded"
+          >
+            Not yet
+          </button>
+        </div>
+      )}
+
+      {expanded && (
+        <div className="px-6 pb-6 pt-4 border-t border-white/5 bg-black/20">
           <div className="flex justify-between items-center mb-4">
-            <h4 className="text-sm font-medium text-muted uppercase tracking-wider">Active Tasks</h4>
+            <h4 className="text-sm font-medium text-muted uppercase tracking-wider">Next steps</h4>
             {!isCompleted && (
               <div className="flex space-x-4">
-                <button 
-                  onClick={handleGenerateNextSteps}
-                  disabled={isGenerating}
+                <button
+                  onClick={() => void generate()}
+                  disabled={generating}
                   className="text-xs flex items-center space-x-1 text-purple-400 hover:text-purple-300 transition-colors disabled:opacity-50"
                 >
-                  <svg className={`w-4 h-4 ${isGenerating ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-                  <span>{isGenerating ? 'Generating...' : 'Generate Steps'}</span>
+                  <svg
+                    className={`w-4 h-4 ${generating ? "animate-spin" : ""}`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                  </svg>
+                  <span>{generating ? "Thinking..." : "Generate steps"}</span>
                 </button>
-                <button 
-                  onClick={() => setIsAddingTask(true)}
+                <button
+                  onClick={() => setAddingTask(true)}
                   className="text-xs flex items-center space-x-1 text-primary-light hover:text-white transition-colors"
                 >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-                  <span>Add Task</span>
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  </svg>
+                  <span>Add step</span>
                 </button>
               </div>
             )}
           </div>
 
           <ul className="space-y-2">
-            {activeTasks.length > 0 ? (
-              activeTasks.map(task => {
-                const isMatch = searchQuery.trim() && task.title.toLowerCase().includes(searchQuery.toLowerCase());
-                return (
-                <li key={task.id} className={`flex justify-between items-center p-3 rounded-lg border group/task transition-colors ${
-                  isMatch ? 'bg-primary/20 border-primary/50 ring-1 ring-primary/30 shadow-[0_0_15px_rgba(var(--primary),0.2)]' : 'bg-white/5 border-white/5 hover:border-primary/30'
-                }`}>
+            {outstanding.length === 0 && !addingTask && (
+              <li className="text-sm text-muted italic text-center py-6 bg-white/5 rounded-lg border border-dashed border-white/10">
+                {tasks.length === 0
+                  ? "No steps yet. Generate some, or add one yourself."
+                  : "Every step is done."}
+              </li>
+            )}
+
+            {outstanding.map((task) => {
+              const isMatch = matchingTaskIds.has(task.id);
+              return (
+                <li
+                  key={task.id}
+                  className={`group/task flex justify-between items-center p-3 rounded-lg border transition-colors ${
+                    isMatch
+                      ? "bg-primary/20 border-primary/50 ring-1 ring-primary/30"
+                      : "bg-white/5 border-white/5 hover:border-primary/30"
+                  }`}
+                >
                   {editingTaskId === task.id ? (
                     <div className="flex items-center space-x-2 w-full">
-                      <input 
-                        type="text" 
-                        value={editTaskTitle}
-                        onChange={e => setEditTaskTitle(e.target.value)}
-                        className="flex-1 bg-black/50 border border-primary/50 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-primary"
+                      <input
                         autoFocus
-                        onKeyDown={e => {
-                          if (e.key === 'Enter') handleSaveEdit(task.id);
-                          if (e.key === 'Escape') setEditingTaskId(null);
+                        value={editTaskTitle}
+                        onChange={(e) => setEditTaskTitle(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && editTaskTitle.trim()) {
+                            const id = task.id;
+                            const title = editTaskTitle;
+                            setEditingTaskId(null);
+                            void run(() => store.renameTask(id, title), "Could not rename the step");
+                          }
+                          if (e.key === "Escape") setEditingTaskId(null);
                         }}
+                        className="flex-1 bg-black/50 border border-primary/50 rounded px-2 py-1 text-sm text-foreground focus:outline-none focus:border-primary"
+                        aria-label="Step title"
                       />
-                      <button onClick={() => handleSaveEdit(task.id)} className="text-green-400 hover:text-green-300">
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                      </button>
-                      <button onClick={() => setEditingTaskId(null)} className="text-red-400 hover:text-red-300">
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                      </button>
                     </div>
                   ) : (
                     <>
                       <div className="flex items-center space-x-3 flex-1 overflow-hidden">
+                        {/*
+                          role="checkbox" rather than a real input: completing
+                          the step moves it out of this list, so the control
+                          cannot hold a checked state. It is still exposed as a
+                          checkbox, and it keeps a visible focus ring, which the
+                          previous focus:outline-none removed.
+                        */}
                         <button
-                          onClick={() => handleComplete(task.id)}
-                          className="w-5 h-5 rounded-md border-2 border-muted/50 hover:border-green-500 hover:bg-green-500/10 flex items-center justify-center text-green-500 transition-all focus:outline-none shrink-0 group/check"
-                          title="Mark as complete"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 opacity-0 group-hover/check:opacity-100 transition-opacity" viewBox="0 0 20 20" fill="currentColor">
-                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                          </svg>
-                        </button>
+                          role="checkbox"
+                          aria-checked="false"
+                          onClick={() => void toggleTask(task)}
+                          className="w-5 h-5 rounded-md border-2 border-muted/50 hover:border-green-500 hover:bg-green-500/10 flex items-center justify-center text-green-500 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-primary shrink-0"
+                          title="Mark as done"
+                          aria-label={`Mark "${task.title}" as done`}
+                        />
                         <span className="text-sm text-foreground truncate" title={task.title}>
                           {task.title}
                         </span>
                       </div>
-                      <div className="flex space-x-2 shrink-0 ml-4 items-center">
-                        <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-1 rounded-full">{task.estimated_minutes} min</span>
-                        
-                        {/* Edit and Delete Actions */}
-                        <div className="flex space-x-1 opacity-0 group-hover/task:opacity-100 transition-opacity ml-2">
-                          <button 
-                            onClick={() => { setEditingTaskId(task.id); setEditTaskTitle(task.title); }}
-                            className="text-muted hover:text-primary p-1"
-                            title="Edit task"
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
-                          </button>
-                          <button 
-                            onClick={() => handleDeleteTask(task.id)}
-                            className="text-muted hover:text-red-500 p-1"
-                            title="Delete task"
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                          </button>
-                        </div>
+                      <div className="flex space-x-1 opacity-0 group-hover/task:opacity-100 focus-within:opacity-100 transition-opacity shrink-0 ml-4">
+                        <button
+                          onClick={() => {
+                            setEditingTaskId(task.id);
+                            setEditTaskTitle(task.title);
+                          }}
+                          className="text-muted hover:text-primary p-1"
+                          title="Edit step"
+                          aria-label={`Edit "${task.title}"`}
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                            />
+                          </svg>
+                        </button>
+                        <button
+                          onClick={() => void run(() => store.deleteTask(task.id), "Could not delete the step")}
+                          className="text-muted hover:text-red-500 p-1"
+                          title="Delete step"
+                          aria-label={`Delete "${task.title}"`}
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                            />
+                          </svg>
+                        </button>
                       </div>
                     </>
                   )}
                 </li>
-                );
-              })
-            ) : (
-              !isAddingTask && !isCompleted && (
-                <li className="text-sm text-muted italic text-center py-6 bg-white/5 rounded-lg border border-dashed border-white/10 flex flex-col items-center justify-center space-y-3">
-                  <div className="flex space-x-2">
-                    <div className="w-2 h-2 rounded-full bg-primary/50 animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                    <div className="w-2 h-2 rounded-full bg-primary/50 animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                    <div className="w-2 h-2 rounded-full bg-primary/50 animate-bounce" style={{ animationDelay: '300ms' }}></div>
-                  </div>
-                  <span>AI is breaking down this goal...</span>
-                </li>
-              )
+              );
+            })}
+
+            {done.length > 0 && (
+              <li className="pt-2">
+                <details className="group/done">
+                  <summary className="text-xs text-muted cursor-pointer hover:text-foreground select-none">
+                    {done.length} completed
+                  </summary>
+                  <ul className="mt-2 space-y-1">
+                    {done.map((task) => (
+                      <li key={task.id} className="flex items-center gap-3 px-3 py-1.5">
+                        <input
+                          type="checkbox"
+                          checked
+                          onChange={() => void toggleTask(task)}
+                          className="w-4 h-4 accent-primary"
+                          aria-label={`Undo completion of "${task.title}"`}
+                        />
+                        <span className="text-sm text-muted line-through truncate">{task.title}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              </li>
             )}
 
-            {isAddingTask && (
+            {addingTask && (
               <li className="p-3 bg-white/5 rounded-lg border border-primary/50">
-                <form onSubmit={handleAddTask} className="flex items-center space-x-2">
-                  <input 
-                    type="text" 
-                    value={newTaskTitle}
-                    onChange={e => setNewTaskTitle(e.target.value)}
-                    placeholder="Describe the task..."
-                    className="flex-1 bg-black/50 border border-white/10 rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-primary"
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!newTaskTitle.trim()) return;
+                    const title = newTaskTitle;
+                    setNewTaskTitle("");
+                    setAddingTask(false);
+                    void run(() => store.createTask(goal.id, title), "Could not add the step");
+                  }}
+                  className="flex items-center space-x-2"
+                >
+                  <input
                     autoFocus
+                    value={newTaskTitle}
+                    onChange={(e) => setNewTaskTitle(e.target.value)}
+                    placeholder="Describe the next step..."
+                    aria-label={`Add a step to "${goal.title}"`}
+                    className="flex-1 bg-black/50 border border-white/10 rounded px-3 py-1.5 text-sm text-foreground focus:outline-none focus:border-primary"
                   />
-                  <button type="submit" className="text-sm bg-primary text-white px-3 py-1.5 rounded hover:bg-primary-light transition-colors">
+                  <button
+                    type="submit"
+                    disabled={!newTaskTitle.trim()}
+                    className="text-sm bg-primary text-white px-3 py-1.5 rounded hover:bg-primary-light disabled:opacity-50"
+                  >
                     Add
                   </button>
-                  <button type="button" onClick={() => setIsAddingTask(false)} className="text-muted hover:text-white p-1.5">
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                  <button
+                    type="button"
+                    onClick={() => setAddingTask(false)}
+                    className="text-muted hover:text-white p-1.5"
+                    aria-label="Cancel"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
                   </button>
                 </form>
               </li>

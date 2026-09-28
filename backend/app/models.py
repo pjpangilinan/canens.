@@ -1,14 +1,14 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, Uuid, func
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
-__all__ = ["Base", "User", "Goal", "Task", "Backup"]
+__all__ = ["Base", "User", "Goal", "Task", "Backup", "AiUsage"]
 
 
 class User(Base):
@@ -95,3 +95,25 @@ class Backup(Base):
     saved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class AiUsage(Base):
+    """A count of model calls made by one user on one day.
+
+    Exists to put a hard ceiling on Bedrock spend. Generation is user
+    triggered and bounded by maxTokens, so the natural exposure is low, but
+    nothing in the application stops a loop of clicks, and the endpoint is
+    public.
+
+    The row is keyed by day rather than deleted, because an in-process counter
+    is not a reliable ceiling: Lambda reuses and discards execution
+    environments freely, so the count would reset behind a caller's back.
+    """
+
+    __tablename__ = "ai_usage"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

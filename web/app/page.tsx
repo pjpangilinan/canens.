@@ -1,137 +1,176 @@
 "use client";
 
-import React, { useEffect, useState } from 'react';
-import GoalCard from '../components/GoalCard';
-import GoalInput from '../components/GoalInput';
-import { createGoal, deleteGoal, updateTask, updateGoal } from '../lib/api';
-import SearchBar from '../components/SearchBar';
-import SuggestedGoals from '../components/SuggestedGoals';
-import { useLiveQuery } from 'dexie-react-hooks';
-import { db, FAKE_USER_ID, Goal, Task, GoalStatus, TaskStatus } from '../lib/db';
-import { syncService } from '../lib/sync';
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLiveQuery } from "dexie-react-hooks";
+
+import GoalCard from "../components/GoalCard";
+import GoalInput from "../components/GoalInput";
+import SearchBar from "../components/SearchBar";
+import Onboarding from "../components/Onboarding";
+import BackupStatus from "../components/BackupStatus";
+import { GoalWithTasks } from "../lib/db";
+import { searchGoals } from "../lib/search";
+import * as store from "../lib/store";
+import { restoreIfEmpty, installUnloadFlush, scheduleBackup } from "../lib/backup";
 
 export default function Home() {
+  const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restored, setRestored] = useState(false);
+  const [canRestore, setCanRestore] = useState(false);
 
   useEffect(() => {
-    syncService.init().catch((err) => {
-      console.error("Sync init failed", err);
-      // We don't necessarily want to block the UI if backend is down, local works!
-    });
+    // Inline rather than via a callback: the restore result arrives later, and
+    // routing it through a function that sets state trips the effect lint.
+    let cancelled = false;
+    restoreIfEmpty({ force: false })
+      .then((outcome) => {
+        if (cancelled) return;
+        if (outcome === "restored") setRestored(true);
+        if (outcome === "declined-because-previously-synced") setCanRestore(true);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setRestoreError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const goals = useLiveQuery(async () => {
-    const gs = await db.goals.filter(g => !g.deleted_at).toArray();
-    const sorted = gs.sort((a,b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    
-    // Fetch ALL active tasks once
-    const allTasks = await db.tasks.filter(t => !t.deleted_at).toArray();
-    
-    // Attach tasks to goals for GoalCard
-    for (const g of sorted) {
-      g.tasks = allTasks.filter(t => t.goal_id === g.id);
+  // The explicit request, from the "Restore?" button. Only offered when this
+  // browser has backed up before, so an empty store means the user emptied it
+  // rather than that they are new.
+  const forceRestore = useCallback(async () => {
+    setCanRestore(false);
+    try {
+      if ((await restoreIfEmpty({ force: true })) === "restored") setRestored(true);
+    } catch (err) {
+      setRestoreError((err as Error).message);
     }
-    return sorted as (Goal & { tasks: Task[] })[];
+  }, []);
+
+  // A 2s debounce means the last edit before closing the tab was otherwise
+  // never uploaded, and a failed upload was never retried without another
+  // write. Flush on the way out and retry on reconnect.
+  useEffect(() => installUnloadFlush(), []);
+
+  const goals = useLiveQuery(async () => {
+    const active = await store.activeGoals();
+    const grouped = await store.tasksForGoals(active.map((g) => g.id));
+    return active.map<GoalWithTasks>((goal) => ({
+      ...goal,
+      tasks: grouped.get(goal.id) ?? [],
+    }));
   });
 
+  const handleError = useCallback((message: string) => setError(message), []);
 
-  const loading = goals === undefined;
+  const onChanged = useCallback(() => {
+    setError(null);
+    scheduleBackup();
+  }, []);
 
-  const handleCreateGoal = async (title: string) => {
-    try {
-      await createGoal(title, FAKE_USER_ID);
-    } catch (err: any) {
-      console.error('Error creating goal:', err);
-    }
-  };
-
-  const handleDeleteGoal = async (id: string) => {
-    try {
-      await deleteGoal(id);
-    } catch (err) {
-      console.error('Error deleting goal:', err);
-    }
-  };
-
-  const handleTaskComplete = async (taskId: string) => {
-    try {
-      await updateTask(taskId, { status: TaskStatus.COMPLETED });
-    } catch (err) {
-      console.error('Error completing task:', err);
-    }
-  };
-
-  const handleCompleteGoal = async (id: string) => {
-    try {
-      await updateGoal(id, { status: GoalStatus.COMPLETED });
-    } catch (err) {
-      console.error('Error completing goal:', err);
-    }
-  };
+  const search = useMemo(
+    () => searchGoals(goals ?? [], query),
+    [goals, query],
+  );
 
   return (
-    <main className="min-h-screen bg-background py-6 px-4 sm:px-6 lg:px-8">
+    <main className="py-8 px-4 sm:px-6 lg:px-8">
       <div className="max-w-2xl mx-auto space-y-6">
-        <header className="text-center space-y-4">
-          <h1 className="text-4xl md:text-5xl font-extrabold text-foreground tracking-tight font-headline">
+        <header className="text-center space-y-3">
+          <h1 className="text-4xl md:text-5xl font-extrabold text-foreground tracking-tight">
             Canens<span className="text-primary">.</span>
           </h1>
           <p className="text-lg text-muted max-w-xl mx-auto">
-            Minimalist Goal Tracker. Keep track of what matters.
+            Break a goal into the next few actions.
           </p>
         </header>
 
-        <section className="mb-4">
-          <GoalInput onSubmit={handleCreateGoal} />
-        </section>
+        <GoalInput
+          onSubmit={async (title) => {
+            await store.createGoal(title);
+            onChanged();
+          }}
+          onError={handleError}
+        />
 
-        <section className="mb-6">
-          <SearchBar value={searchQuery} onChange={setSearchQuery} />
-        </section>
+        <SearchBar
+          value={query}
+          onChange={setQuery}
+          label="Search goals and steps"
+          hint="Search goals and steps..."
+        />
+
+        {restored && (
+          <p className="text-sm text-green-400 bg-green-500/10 border border-green-500/20 rounded-lg px-4 py-2">
+            Restored your goals from backup.
+          </p>
+        )}
+        {canRestore && (
+          <div className="flex flex-wrap items-center gap-3 text-sm bg-primary/10 border border-primary/30 rounded-lg px-4 py-3">
+            <p className="flex-1 min-w-[12rem] text-foreground">
+              Your goals are empty, but a backup exists. Restore it?
+            </p>
+            <button
+              onClick={() => void forceRestore()}
+              className="bg-primary text-white px-3 py-1.5 rounded hover:bg-primary-light"
+            >
+              Restore
+            </button>
+          </div>
+        )}
+        {restoreError && (
+          <p className="text-sm text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-4 py-2">
+            Could not check for a backup: {restoreError}
+          </p>
+        )}
+
+        {error && (
+          <div className="flex items-start gap-3 bg-red-900/10 border border-red-500/20 rounded-xl px-4 py-3">
+            <p className="text-red-400 text-sm flex-1">{error}</p>
+            <button onClick={() => setError(null)} className="text-red-400/70 hover:text-red-400" aria-label="Dismiss">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        )}
 
         <section className="space-y-4">
-          {loading ? (
-            <div className="text-center py-12 space-y-4">
-              <div className="animate-pulse space-y-4 max-w-sm mx-auto">
-                <div className="h-24 bg-surface rounded-xl border border-primary/10"></div>
-                <div className="h-24 bg-surface rounded-xl border border-primary/10"></div>
-              </div>
+          {goals === undefined ? (
+            <div className="animate-pulse space-y-4 max-w-sm mx-auto">
+              <div className="h-24 bg-surface rounded-xl border border-primary/10" />
+              <div className="h-24 bg-surface rounded-xl border border-primary/10" />
             </div>
-          ) : error ? (
-            <div className="text-center py-12 px-6 bg-red-900/10 border border-red-500/20 rounded-xl">
-              <p className="text-red-400 font-medium">{error}</p>
-              <p className="text-muted text-sm mt-2">Make sure the backend is running.</p>
-            </div>
-          ) : goals.length === 0 ? (
-            <SuggestedGoals onSelectGoal={handleCreateGoal} />
+          ) : goals.length === 0 && !query.trim() ? (
+            <Onboarding onCreateGoal={async (title) => {
+              await store.createGoal(title);
+              onChanged();
+            }} onError={handleError} />
+          ) : search.goals.length === 0 ? (
+            <p className="text-center text-muted py-12">
+              {query.trim() ? `Nothing matches "${query.trim()}".` : "No active goals."}
+            </p>
           ) : (
             <div className="space-y-4">
-              {goals
-                .filter((goal) => {
-                  if (!searchQuery.trim()) return true;
-                  const query = searchQuery.toLowerCase();
-                  return (
-                    goal.title.toLowerCase().includes(query) ||
-                    goal.tasks.some(t => t.title.toLowerCase().includes(query))
-                  );
-                })
-                .map((goal) => (
-                  <GoalCard 
-                    key={goal.id} 
-                    id={goal.id} 
-                    title={goal.title} 
-                    status={goal.status} 
-                    tasks={goal.tasks} 
-                    searchQuery={searchQuery}
-                    onDelete={handleDeleteGoal}
-                    onComplete={handleCompleteGoal}
-                    onTaskComplete={handleTaskComplete}
-                  />
-                ))}
+              {search.goals.map((goal) => (
+                <GoalCard
+                  key={goal.id}
+                  goal={goal}
+                  tasks={goal.tasks}
+                  matchingTaskIds={search.matchingTaskIds}
+                  startExpanded={search.expandGoalIds.has(goal.id)}
+                  onChanged={onChanged}
+                  onError={handleError}
+                />
+              ))}
             </div>
           )}
         </section>
+
+        <BackupStatus />
       </div>
     </main>
   );

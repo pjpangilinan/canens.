@@ -1,100 +1,92 @@
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' ? `http://${window.location.hostname}:8000` : 'http://localhost:8000');
+/**
+ * The only module that talks to the network.
+ *
+ * Both calls are AI requests. The store is local; backup lives in
+ * `backup.ts`. Keeping the split explicit means a reader can tell at a glance
+ * which operations need the backend.
+ */
+import { API_BASE, apiHeaders } from "./config";
 
-import { db, FAKE_USER_ID, Task, Goal, GoalStatus, TaskStatus } from './db';
-import { syncService } from './sync';
-
-export type { Task, Goal };
-
-export async function fetchGoals(): Promise<Goal[]> {
-  return await db.goals.filter(g => !g.deleted_at).toArray();
+export interface NextStepsResult {
+  status: "more" | "done";
+  tasks: string[];
 }
 
-export async function createGoal(title: string, user_id: string): Promise<Goal> {
-  const goal: Goal = {
-    id: crypto.randomUUID(),
-    user_id,
-    title,
-    status: GoalStatus.ACTIVE,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    deleted_at: null,
-    dirty: 1
-  };
-  await db.goals.add(goal);
-  syncService.pushChanges();
-  return goal;
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
 }
 
-export async function updateGoal(goal_id: string, updates: Partial<Goal>): Promise<Goal> {
-  const now = new Date().toISOString();
-  await db.goals.update(goal_id, { ...updates, updated_at: now, dirty: 1 });
-  syncService.pushChanges();
-  const g = await db.goals.get(goal_id);
-  return g as Goal;
+/**
+ * How long to wait for a model call before giving up.
+ *
+ * Without this, a request that never settles leaves the button reading
+ * "Thinking..." indefinitely, with no way out but reloading.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: apiHeaders(),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    // A network failure reaches fetch as a TypeError, which would otherwise
+    // surface as an unhelpful "Failed to fetch".
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ApiError("The request timed out. Try again.", 0);
+    }
+    throw new ApiError("Could not reach the server. Check your connection.", 0);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    let detail = `Request failed: ${response.status}`;
+    try {
+      const payload = await response.json();
+      if (typeof payload?.detail === "string") detail = payload.detail;
+    } catch {
+      // Body was not JSON; keep the status-based message.
+    }
+    throw new ApiError(detail, response.status);
+  }
+
+  try {
+    return (await response.json()) as T;
+  } catch {
+    // A 200 with a non-JSON body: a CDN interstitial, a misrouted proxy, or an
+    // API Gateway default response. Surfacing the raw parser error would be
+    // both confusing and useless.
+    throw new ApiError("The server returned an unexpected response.", response.status);
+  }
 }
 
-export async function deleteGoal(goal_id: string): Promise<void> {
-  const now = new Date().toISOString();
-  await db.goals.update(goal_id, { deleted_at: now, updated_at: now, dirty: 1 });
-  syncService.pushChanges();
-}
-
-
-
-export async function updateTask(task_id: string, updates: Partial<Task>): Promise<Task> {
-  const now = new Date().toISOString();
-  await db.tasks.update(task_id, { ...updates, updated_at: now, dirty: 1 });
-  syncService.pushChanges();
-  const t = await db.tasks.get(task_id);
-  return t as Task;
-}
-
-export async function deleteTask(task_id: string): Promise<void> {
-  const now = new Date().toISOString();
-  await db.tasks.update(task_id, { deleted_at: now, updated_at: now, dirty: 1 });
-  syncService.pushChanges();
-}
-
-export async function createTask(goal_id: string, title: string, estimated_minutes: number): Promise<Task> {
-  const task: Task = {
-    id: crypto.randomUUID(),
-    user_id: FAKE_USER_ID,
-    goal_id,
-    title,
-    estimated_minutes,
-    status: TaskStatus.PENDING,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    deleted_at: null,
-    dirty: 1
-  };
-  await db.tasks.add(task);
-  syncService.pushChanges();
-  return task;
-}
-
-
-
-export interface TaskDraft {
-  title: string;
-  estimated_minutes: number;
-}
-
-export interface GoalBreakdown {
-  is_completed: boolean;
-  tasks: TaskDraft[];
-}
-
-export async function fetchCompletedTasks(user_id?: string): Promise<Task[]> {
-  return await db.tasks.filter(t => t.status === TaskStatus.COMPLETED && !t.deleted_at).toArray();
-}
-
-export async function generateNextSteps(goal_id: string, current_tasks: { title: string, status: string }[]): Promise<GoalBreakdown> {
-  const res = await fetch(`${API_BASE}/api/goals/${goal_id}/generate-next-steps`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ current_tasks })
+export function fetchNextSteps(
+  goalTitle: string,
+  existingTasks: { title: string; status: string }[],
+): Promise<NextStepsResult> {
+  return post<NextStepsResult>("/api/goals/next-steps", {
+    goal_title: goalTitle,
+    existing_tasks: existingTasks,
   });
-  if (!res.ok) throw new Error('Failed to generate tasks');
-  return await res.json();
+}
+
+export function fetchStarterGoals(answers: string, count = 4): Promise<{ goals: string[] }> {
+  return post<{ goals: string[] }>("/api/onboarding/starter-goals", {
+    answers,
+    count,
+  });
 }

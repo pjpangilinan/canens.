@@ -1,114 +1,182 @@
 "use client";
 
-import React, { useEffect, useState } from 'react';
-import { fetchCompletedTasks, Task } from '../../lib/api';
+import { useMemo, useState } from "react";
+import { useLiveQuery } from "dexie-react-hooks";
+import { db, GoalStatus, TaskStatus } from "../../lib/db";
+import SearchBar from "../../components/SearchBar";
+import { scheduleBackup } from "../../lib/backup";
+import { reopenGoal, timestampOf } from "../../lib/store";
 
-interface GroupedTasks {
-  [dateString: string]: Task[];
+interface DayGroup {
+  /** Sortable key, e.g. 2026-10-01. Never rendered. */
+  iso: string;
+  /** Human label, e.g. "October 1, 2026". */
+  date: string;
+  goals: { id: string; title: string; tasks: string[] }[];
 }
 
+/**
+ * The home for completed work.
+ *
+ * An archived goal is filtered out of the active list, so without this page
+ * finishing your work would make it unreachable. Goals are named alongside
+ * their completed steps for that reason.
+ */
 export default function ActivityLog() {
-  const [groupedTasks, setGroupedTasks] = useState<GroupedTasks>({});
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
-  useEffect(() => {
-    const loadTasks = async () => {
-      try {
-        const tasks = await fetchCompletedTasks();
-        
-        // Group by date
-        const grouped: GroupedTasks = {};
-        tasks.forEach(task => {
-          // If updated_at isn't returned for some reason, fallback to created_at or now
-          const dateVal = task.updated_at || task.created_at || new Date().toISOString();
-          const dateObj = new Date(dateVal);
-          
-          // Format as "July 24, 2026"
-          const dateString = dateObj.toLocaleDateString(undefined, {
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric'
-          });
-          
-          if (!grouped[dateString]) {
-            grouped[dateString] = [];
-          }
-          grouped[dateString].push(task);
-        });
-        
-        setGroupedTasks(grouped);
-      } catch (err: any) {
-        setError(err.message || 'Failed to load activity log');
-      } finally {
-        setLoading(false);
+  const data = useLiveQuery(async () => {
+    const goals = await db.goals.where("status").equals(GoalStatus.COMPLETED).toArray();
+    const goalIds = new Set(goals.map((g) => g.id));
+
+    const completed = (
+      await db.tasks
+        .where("status")
+        .equals(TaskStatus.COMPLETED)
+        .filter((t) => goalIds.has(t.goal_id))
+        .toArray()
+    ).sort((a, b) => timestampOf(a.updated_at) - timestampOf(b.updated_at));
+
+    return { goals, completed };
+  });
+
+  // Derived rather than stored: an effect that setState from the query
+  // result would cause a second render pass for no benefit.
+  const loading = data === undefined;
+
+  const groups = useMemo<DayGroup[]>(() => {
+    if (!data) return [];
+
+    const needle = query.trim().toLowerCase();
+
+    // Grouped by goal, not by task. Deriving the groups from completed tasks
+    // made a goal that was archived before it had any steps invisible, which
+    // is the exact data loss this page exists to prevent.
+    const byDay = new Map<string, DayGroup>();
+    for (const goal of data.goals) {
+      const steps = data.completed.filter((t) => t.goal_id === goal.id);
+      if (needle) {
+        const goalMatches = goal.title.toLowerCase().includes(needle);
+        const stepMatches = steps.some((t) => t.title.toLowerCase().includes(needle));
+        if (!goalMatches && !stepMatches) continue;
       }
-    };
-    
-    loadTasks();
-  }, []);
+
+      // Grouped and sorted on an ISO key. Sorting the rendered label is
+      // alphabetical by month name, which put "October 1" above
+      // "September 28" and left the log in the wrong order across months.
+      const when = new Date(goal.updated_at);
+      const iso = when.toISOString().slice(0, 10);
+      const group = byDay.get(iso) ?? {
+        iso,
+        date: when.toLocaleDateString(undefined, {
+          year: "numeric",
+          month: "long",
+          day: "numeric",
+        }),
+        goals: [],
+      };
+      group.goals.push({
+        id: goal.id,
+        title: goal.title,
+        tasks: steps.map((t) => t.title),
+      });
+      byDay.set(iso, group);
+    }
+
+    return [...byDay.values()].sort((a, b) => b.iso.localeCompare(a.iso));
+  }, [data, query]);
+
+  const totalGoals = groups.reduce((sum, group) => sum + group.goals.length, 0);
+  const totalSteps = groups.reduce(
+    (sum, group) => sum + group.goals.reduce((n, goal) => n + goal.tasks.length, 0),
+    0,
+  );
 
   return (
-    <main className="min-h-screen py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-2xl mx-auto space-y-12">
-        <header className="space-y-2">
-          <h1 className="text-3xl font-extrabold text-foreground tracking-tight font-headline">
+    <main className="py-12 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-2xl mx-auto space-y-8">
+        <header className="space-y-3">
+          <h1 className="text-3xl font-extrabold text-foreground tracking-tight">
             Activity Log
           </h1>
-          <p className="text-muted">A history of what you've accomplished.</p>
+          <p className="text-muted">Everything you have finished, and what it was for.</p>
         </header>
 
+        <SearchBar
+          value={query}
+          onChange={setQuery}
+          label="Search finished goals and steps"
+          hint="Search what you have finished..."
+        />
+
         {loading ? (
-          <div className="space-y-8 animate-pulse">
-            {[1, 2].map(i => (
-              <div key={i} className="space-y-4">
-                <div className="h-6 w-32 bg-white/5 rounded-md"></div>
-                <div className="h-20 bg-surface rounded-xl border border-white/5"></div>
-              </div>
-            ))}
+          <div className="space-y-4 animate-pulse">
+            <div className="h-6 w-32 bg-white/5 rounded-md" />
+            <div className="h-20 bg-surface rounded-xl" />
           </div>
-        ) : error ? (
-          <div className="p-6 bg-red-900/10 border border-red-500/20 rounded-xl text-red-400">
-            {error}
-          </div>
-        ) : Object.keys(groupedTasks).length === 0 ? (
-          <div className="text-center py-16 bg-surface/30 rounded-xl border border-dashed border-white/10">
-            <p className="text-muted italic">No completed tasks yet. Time to get to work!</p>
-          </div>
+        ) : groups.length === 0 ? (
+          <p className="text-center text-muted italic py-16 bg-surface/30 rounded-xl border border-dashed border-white/10">
+            {query.trim() ? `Nothing matches "${query.trim()}".` : "Nothing completed yet."}
+          </p>
         ) : (
           <div className="space-y-10">
-            {Object.entries(groupedTasks).map(([date, tasks]) => (
-              <section key={date} className="space-y-4">
-                <div className="flex items-center space-x-4">
-                  <h2 className="text-lg font-semibold text-white">{date}</h2>
-                  <div className="flex-1 h-px bg-white/10"></div>
+            {groups.map((group) => (
+              <section key={group.date} className="space-y-4">
+                <div className="flex items-center gap-4">
+                  <h2 className="text-lg font-semibold text-foreground">{group.date}</h2>
+                  <div className="flex-1 h-px bg-white/10" />
                   <span className="text-sm font-medium text-muted bg-white/5 px-2.5 py-0.5 rounded-full">
-                    {tasks.length} task{tasks.length !== 1 ? 's' : ''}
+                    {group.goals.length} {group.goals.length === 1 ? "goal" : "goals"}
                   </span>
                 </div>
-                
-                <div className="space-y-3 pl-4 border-l-2 border-white/5">
-                  {tasks.map(task => (
-                    <div key={task.id} className="p-4 bg-surface rounded-xl border border-white/5 hover:border-primary/20 transition-colors flex items-center justify-between group">
-                      <div className="flex items-center space-x-3">
-                        <div className="w-5 h-5 rounded-full bg-primary/20 flex items-center justify-center">
-                          <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 text-primary-light" viewBox="0 0 20 20" fill="currentColor">
-                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                          </svg>
-                        </div>
-                        <span className="text-foreground group-hover:text-white transition-colors">
-                          {task.title}
-                        </span>
+
+                <ul className="space-y-4">
+                  {group.goals.map((goal) => (
+                    <li key={goal.id} className="bg-surface rounded-xl border border-white/5 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <h3 className="text-foreground font-medium">{goal.title}</h3>
+                        {/* Archiving is not a one-way door. Completing the last
+                            step removes the goal card entirely, so this is the
+                            only way back. */}
+                        <button
+                          onClick={() => {
+                            void reopenGoal(goal.id);
+                            scheduleBackup();
+                          }}
+                          className="text-xs text-muted hover:text-primary transition-colors shrink-0"
+                        >
+                          Reopen
+                        </button>
                       </div>
-                      
-                      <div className="flex items-center space-x-2">
-                        <span className="text-xs text-muted/60">{task.estimated_minutes}m</span>
-                      </div>
-                    </div>
+                      {goal.tasks.length > 0 ? (
+                        <ul className="mt-3 space-y-2 pl-4 border-l-2 border-white/5">
+                          {goal.tasks.map((step) => (
+                            <li key={step} className="flex items-center gap-3">
+                              <span className="w-4 h-4 rounded-full bg-primary/20 flex items-center justify-center shrink-0 text-primary-light">
+                                <svg className="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 20 20">
+                                  <path
+                                    fillRule="evenodd"
+                                    d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                    clipRule="evenodd"
+                                  />
+                                </svg>
+                              </span>
+                              <span className="text-sm text-muted">{step}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-2 text-sm text-muted/70 italic">No steps recorded.</p>
+                      )}
+                    </li>
                   ))}
-                </div>
+                </ul>
               </section>
             ))}
+            <p className="text-center text-xs text-muted/70">
+              {totalGoals} {totalGoals === 1 ? "goal" : "goals"} archived, {totalSteps}{" "}
+              {totalSteps === 1 ? "step" : "steps"} completed.
+            </p>
           </div>
         )}
       </div>
