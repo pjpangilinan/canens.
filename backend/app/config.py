@@ -3,12 +3,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgresql+asyncpg://canens:canens_dev_pass@localhost:5432/canens"
+    # Where the whole-store snapshot lives. One object per user, overwritten on
+    # every upload, so it is a key/value store rather than a database.
+    snapshot_bucket: str = "canens-snapshots"
+    usage_table: str = "canens-ai-usage"
 
     # Bedrock credentials are not read here. They come from the execution role
     # that Lambda provides, so there is no API key to configure or leak.
     aws_region: str = "us-east-1"
-    bedrock_model_id: str = "amazon.nova-lite-v1:0"
+    bedrock_model_id: str = "amazon.nova-lite-v1-v1:0"
 
     # Per-token billing makes an unbounded generation a real cost, so every
     # call is capped explicitly.
@@ -16,6 +19,9 @@ class Settings(BaseSettings):
     bedrock_timeout_seconds: float = 20.0
 
     # Hard ceiling on model calls per user per day. Set to 0 to disable.
+    # The count lives in DynamoDB, not in memory, because Lambda discards
+    # execution environments and an in-process counter would reset behind your
+    # back.
     ai_daily_cap: int = 200
 
     # Comma-separated list of exact origins permitted to call the API.

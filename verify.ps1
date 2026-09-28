@@ -2,6 +2,9 @@ param(
   [switch]$SkipAI
 )
 
+# One command that runs every check, including the ones CI does not: the two
+# end-to-end passes against a live API, and the pass that calls Bedrock for
+# real. CI deliberately stops short of the billable one.
 $root = $PSScriptRoot
 $failures = New-Object System.Collections.Generic.List[string]
 
@@ -39,22 +42,16 @@ function Section($name) {
 $backend = Join-Path $root "backend"
 $web = Join-Path $root "web"
 
-$env:DATABASE_URL = "postgresql+asyncpg://canens:canens_dev_pass@localhost:5432/canens_test"
 $env:PYTHONPATH = $backend
 
 Write-Output "Canens verification started $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Output "AI tests: $(if ($SkipAI) { 'skipped' } else { 'enabled' })"
 
-Section "Infrastructure"
-Step "compose services" $root "docker compose ps --format '{{.Name}} {{.State}} {{.Status}}'"
-Step "postgres accepting connections" $root "docker compose exec -T db pg_isready -U canens -d canens"
-Step "databases present" $root "docker compose exec -T db psql -U canens -d canens -tAc `"select datname from pg_database where datistemplate = false order by 1`""
-
 Section "Backend"
-Step "all modules import" $backend ".\venv\Scripts\python.exe -c `"import app.main, app.deps, app.migrate, app.schemas, app.services.bedrock, app.routers.ai, app.routers.backup, app.lambda_handler; print('ok')`""
-Step "migrations match the models" $backend ".\venv\Scripts\python.exe -m pytest tests/test_migrations.py -q"
+Step "all modules import" $backend ".\venv\Scripts\python.exe -c `"import app.main, app.deps, app.schemas, app.storage, app.services.bedrock, app.services.usage, app.routers.ai, app.routers.backup, app.lambda_handler; print('ok')`""
 Step "full backend suite" $backend ".\venv\Scripts\python.exe -m pytest -q"
-Step "no live references to removed modules" $backend "Select-String -Path (Get-ChildItem -Recurse -Include *.py -Path app,tests | ForEach-Object FullName) -Pattern 'services\.llm|websocket|sync_engine|routers\.sync|routers\.goals|routers\.tasks|requires_high_energy|EnergyLevel|WorkBlockStatus|api\.groq|OLLAMA_BASE_URL|GROQ_API_KEY' -ErrorAction SilentlyContinue"
+Step "no live references to removed modules" $backend "Select-String -Path (Get-ChildItem -Recurse -Include *.py -Path app,tests | ForEach-Object FullName) -Pattern 'services\.llm|websocket|sync_engine|routers\.sync|routers\.goals|routers\.tasks|requires_high_energy|EnergyLevel|WorkBlockStatus|api\.groq|OLLAMA_BASE_URL|GROQ_API_KEY|sqlalchemy|asyncpg|alembic|get_db|DATABASE_URL' -ErrorAction SilentlyContinue"
+Step "no live references to the removed database" $backend "Select-String -Path (Get-ChildItem -Recurse -Include *.py,*.txt,*.ini -Path app,tests | ForEach-Object FullName) -Pattern 'models|database|seed|migrate' -ErrorAction SilentlyContinue | Where-Object { `$_.Path -notmatch '__pycache__' }"
 Step "bedrock stop reasons match the real enum" $backend ".\venv\Scripts\python.exe -c `"import gzip,json,os,pathlib,botocore; base=os.path.join(os.path.dirname(botocore.__file__),'data','bedrock-runtime','2023-09-30'); m=json.loads(gzip.open(os.path.join(base,'service-2.json.gz'),'rt',encoding='utf-8').read()); op=m['operations']['Converse']; out=m['shapes'][op['output']['shape']]; enum=set(m['shapes'][out['members']['stopReason']['shape']]['enum']); src=pathlib.Path('app/services/bedrock.py').read_text(); import re; used=set(re.findall(r'==\s*.(max_tokens|end_turn|tool_use|stop_sequence|guardrail_intervened|content_filtered|malformed_model_output|malformed_tool_use|model_context_window_exceeded).', src)); assert used <= enum, f'code compares against values Bedrock never returns: {used-enum}'; print('compares only against real stop reasons:', sorted(used))`""
 
 Section "Web"
@@ -71,16 +68,20 @@ Remove-Item Env:CANENS_E2E_AI -ErrorAction SilentlyContinue
 $env:NEXT_PUBLIC_API_URL = ""
 Step "e2e standalone" $web "npm run test:e2e"
 
-Section "End to end, live backend"
-$env:CANENS_E2E_API = "1"
-$env:NEXT_PUBLIC_API_URL = "http://127.0.0.1:8000"
-Step "e2e with backup round trip" $web "npm run test:e2e"
+if ($SkipAI) {
+  Section "Skipped"
+  Write-Output "The live-backend and live-model passes need the API running and"
+  Write-Output "AWS credentials. Re-run without -SkipAI to include them."
+} else {
+  Section "End to end, live backend"
+  Write-Output "Start the API first:  docker compose up -d  then  uvicorn app.main:app"
+  $env:CANENS_E2E_API = "1"
+  $env:NEXT_PUBLIC_API_URL = "http://127.0.0.1:8000"
+  Step "e2e with backup round trip" $web "npm run test:e2e"
 
-if (-not $SkipAI) {
   Section "End to end, real Bedrock"
   $env:CANENS_E2E_AI = "1"
   Step "e2e with live model calls" $web "npm run test:e2e"
-  Step "calls recorded against today" $root "docker compose exec -T db psql -U canens -d canens -tAc `"select day, calls from ai_usage order by day desc limit 1`""
 }
 
 Section "Result"

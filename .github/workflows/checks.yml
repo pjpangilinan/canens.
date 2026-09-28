@@ -2,26 +2,12 @@ name: Checks
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
 
 jobs:
   backend:
     runs-on: ubuntu-latest
-
-    services:
-      db:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: canens
-          POSTGRES_PASSWORD: canens_dev_pass
-          POSTGRES_DB: canens_test
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U canens"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     defaults:
       run:
@@ -38,11 +24,10 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      # No service container and no database. The snapshot is an S3 object and
+      # the daily cap is a DynamoDB item, both faked at the boto3 client
+      # boundary, so there is nothing to stand up and nothing to pay for.
       - name: Test
-        # Real Postgres, not SQLite. now() does not exist in SQLite, which is
-        # how an unevaluated SQL expression went uncaught for so long.
-        env:
-          DATABASE_URL: postgresql+asyncpg://canens:canens_dev_pass@localhost:5432/canens_test
         run: python -m pytest -q
 
   web:
@@ -61,7 +46,6 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - run: npm ci
-
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test

@@ -11,6 +11,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 DOCKERFILE = Path(__file__).resolve().parent.parent / "Dockerfile"
 
 
@@ -26,8 +28,8 @@ def _cmd() -> list[str]:
 
 
 def test_cmd_is_exec_form() -> None:
-    # A list is passed to the kernel. A bare string is shell form, which Lambda
-    # does not run for container images.
+    # A list is exec form and is passed to the kernel. A bare string is shell
+    # form, which Lambda does not run for container images.
     assert _cmd()[0] == "python", _cmd()
 
 
@@ -46,3 +48,21 @@ def test_runtime_interface_client_is_pinned() -> None:
     # that surfaces only as Runtime.InvalidEntrypoint in a deployed function.
     requirements = (DOCKERFILE.parent / "requirements.txt").read_text(encoding="utf-8")
     assert re.search(r"^awslambdaric==\S+", requirements, re.MULTILINE), requirements
+
+
+def test_image_carries_everything_the_handler_imports() -> None:
+    # The image copies the app and nothing else. A new top-level package
+    # imported by the handler would be missing at runtime.
+    copied = set(
+        re.findall(r"^COPY\s+(\S+)", DOCKERFILE.read_text(encoding="utf-8"), re.MULTILINE)
+    )
+    assert "app" in copied, f"the image does not copy app; copies {sorted(copied)}"
+    # Nothing from the database era should be back: there is no database, and a
+    # copy line for a directory that does not exist fails the build.
+    for removed in ("alembic.ini", "migrations", "models.py", "database.py"):
+        assert removed not in copied, f"the image copies {removed}, which no longer exists"
+
+
+@pytest.mark.parametrize("absent", ["requirements.txt.in", "venv", "alembic"])
+def test_image_does_not_copy_build_leftovers(absent: str) -> None:
+    assert absent not in _cmd()

@@ -1,15 +1,10 @@
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, Header, HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import MVP_USER_ID, settings
-from app.database import get_db
-from app.models import AiUsage, User
+from app.services.usage import DailyCapReached, reserve_call
 
 
 async def require_token(
@@ -33,60 +28,31 @@ async def require_token(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
-async def current_user_id(
-    db: AsyncSession = Depends(get_db),
-) -> uuid.UUID:
-    """Resolve the single MVP user, creating it on first use.
+async def current_user_id() -> uuid.UUID:
+    """The single MVP user.
 
     Real accounts are out of scope. The id is still threaded through every
-    model and query so that adding them later does not mean reworking the
-    data access.
+    store key so that adding them later is not a data migration.
     """
-    user_id = uuid.UUID(MVP_USER_ID)
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalars().first()
-    if user is None:
-        user = User(id=user_id, email="owner@canens.app")
-        db.add(user)
-        await db.commit()
-    return user_id
+    return uuid.UUID(MVP_USER_ID)
 
 
-async def enforce_daily_ai_cap(
+def enforce_daily_ai_cap(
     user_id: uuid.UUID = Depends(current_user_id),
-    db: AsyncSession = Depends(get_db),
 ) -> None:
     """Reserve one model call, refusing once the day's allowance is spent.
 
-    The reservation is a single atomic upsert, so two concurrent requests
-    cannot both slip past the limit. It is committed before the model is
-    called: a refused request costs nothing, and a call that then fails still
-    consumed an attempt, which is the behaviour you want from a ceiling.
+    The reservation is committed before the model is called: a refused request
+    costs nothing, and a call that then fails still consumed an attempt, which
+    is the behaviour you want from a ceiling.
+
+    Sync on purpose. boto3 blocks, and FastAPI only runs a dependency in its
+    threadpool when it is a plain ``def``; as ``async def`` it would block the
+    event loop for the length of the DynamoDB round trip.
     """
-    limit = settings.ai_daily_cap
-    if limit <= 0:
-        return
-
-    today = datetime.now(timezone.utc).date()  # not date.today(): Lambda is UTC, a laptop is not
-    table = AiUsage.__table__
-    statement = (
-        pg_insert(AiUsage)
-        .values(user_id=user_id, day=today, calls=1)
-        .on_conflict_do_update(
-            index_elements=[table.c.user_id, table.c.day],
-            set_={"calls": table.c.calls + 1},
-        )
-        .returning(table.c.calls)
-    )
-    calls = (await db.execute(statement)).scalar_one()
-    await db.commit()
-
-    if calls > limit:
-        tomorrow = today + timedelta(days=1)
+    try:
+        reserve_call(str(user_id), settings.ai_daily_cap)
+    except DailyCapReached as exc:
         raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=(
-                f"Daily model call limit reached ({limit}). "
-                f"Try again after {tomorrow.isoformat()}."
-            ),
-        )
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
+        ) from exc

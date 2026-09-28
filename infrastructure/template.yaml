@@ -7,27 +7,15 @@ Description: >
   credentials cannot live in a browser bundle, and because a copy of the data
   is worth having somewhere other than the user's browser profile.
 
-  Network layout is deliberate: public subnets only, no NAT Gateway. A Lambda
-  in a private subnet needs a NAT Gateway to reach Bedrock, which costs about
-  $32/month before any traffic. A Lambda in a public subnet gets a public IP
-  and reaches the internet through the IGW directly. The database shares those
-  subnets but its security group accepts connections only from the Lambda's
-  security group, so it is not reachable from the internet in any useful way.
+  There is no database, and deliberately no VPC. The snapshot is one object in
+  S3 and the daily model-call counter is one item in DynamoDB, both of which are
+  AWS services the function can reach directly with a public IP. A VPC would
+  have been needed only to reach a database inside it, and a Lambda in a VPC
+  cannot reach the internet at all without a NAT gateway (about $33/month) or a
+  private endpoint (about $7/month). With neither, this stack costs about
+  $0.02/month.
 
 Parameters:
-  DatabaseName:
-    Type: String
-    Default: canens
-    Description: Name of the Postgres database to create.
-  DatabaseUsername:
-    Type: String
-    Default: canens
-    Description: Master username for the database.
-  DatabasePassword:
-    Type: String
-    NoEcho: true
-    MinLength: 16
-    Description: Master password. Stored in SSM at /canens/prod/database-password.
   ApiToken:
     Type: String
     NoEcho: true
@@ -44,10 +32,14 @@ Parameters:
     Type: String
     Default: amazon.nova-lite-v1:0
     Description: Bedrock model used for goal breakdown and starter goals.
+  AlertEmail:
+    Type: String
+    Description: Address notified when the stack nears its monthly budget.
 
 Globals:
   Function:
-    Runtime: python3.13
+    # No Runtime: Lambda rejects it on a function with PackageType Image, and
+    # the base image is decided by backend/Dockerfile anyway.
     Timeout: 30
     MemorySize: 512
     Architectures:
@@ -55,203 +47,81 @@ Globals:
 
 Resources:
 
-  # ---------------------------------------------------------------- network
+  # -------------------------------------------------------------- the store
 
-  VPC:
-    Type: AWS::EC2::VPC
+  # One object per user, overwritten on every upload. There are no queries to
+  # run and no rows to join, so an object store is the whole requirement and a
+  # relational engine would be paying for features nothing here uses.
+  #
+  # Retained on delete: this is the user's only copy of their data outside the
+  # browser, so `sam delete` must not take it with it.
+  SnapshotBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
-      CidrBlock: 10.0.0.0/16
-      EnableDnsHostnames: true
-      EnableDnsSupport: true
-      Tags:
-        - Key: Name
-          Value: canens-prod
+      BucketName: !Sub "canens-snapshots-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # Disables ACLs entirely, so the object ownership rules cannot be loosened
+      # later by someone adding a grant.
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - !Ref AllowedOrigins
+            AllowedMethods: [GET, PUT]
+            AllowedHeaders: [Content-Type]
+            MaxAge: 3000
 
-  InternetGateway:
-    Type: AWS::EC2::InternetGateway
+  # One item per user per day, holding how many model calls have been made, and
+  # removed by TTL. It is here rather than in memory because Lambda discards
+  # execution environments: a counter in a process resets to zero whenever the
+  # container is replaced, which looks like a working ceiling and is not one.
+  UsageTable:
+    Type: AWS::DynamoDB::Table
     Properties:
-      Tags:
-        - Key: Name
-          Value: canens-prod
-
-  AttachGateway:
-    Type: AWS::EC2::VPCGatewayAttachment
-    Properties:
-      VpcId: !Ref VPC
-      InternetGatewayId: !Ref InternetGateway
-
-  PublicSubnetA:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      CidrBlock: 10.0.1.0/24
-      AvailabilityZone: !Select [0, !GetAZs '']
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: canens-prod-a
-
-  PublicSubnetB:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      CidrBlock: 10.0.2.0/24
-      AvailabilityZone: !Select [1, !GetAZs '']
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: canens-prod-b
-
-  PublicRouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: canens-prod
-
-  PublicRoute:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref InternetGateway
-
-  SubnetARouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PublicSubnetA
-      RouteTableId: !Ref PublicRouteTable
-
-  SubnetBRouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PublicSubnetB
-      RouteTableId: !Ref PublicRouteTable
-
-  # ----------------------------------------------------------- security
-
-  LambdaSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Canens Lambda egress
-      VpcId: !Ref VPC
-      SecurityGroupEgress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-          Description: HTTPS, for Bedrock
-        - IpProtocol: tcp
-          FromPort: 5432
-          ToPort: 5432
-          CidrIp: 10.0.0.0/16
-          Description: Postgres, inside the VPC
-
-  DatabaseSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Canens RDS ingress
-      VpcId: !Ref VPC
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 5432
-          ToPort: 5432
-          SourceSecurityGroupId: !Ref LambdaSecurityGroup
-          Description: Postgres, from the Lambda only
-
-  # -------------------------------------------------------------- database
-
-  DatabaseSubnetGroup:
-    Type: AWS::RDS::DBSubnetGroup
-    Properties:
-      DBSubnetGroupDescription: Canens
-      SubnetIds:
-        - !Ref PublicSubnetA
-        - !Ref PublicSubnetB
-
-  DatabaseSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: canens/prod/database
-      Description: Canens Postgres master credentials
-      SecretString: !Sub >-
-        {"username": "${DatabaseUsername}", "password": "${DatabasePassword}"}
-
-  Database:
-    Type: AWS::RDS::DBInstance
-    Properties:
-      DBInstanceIdentifier: canens-prod
-      DBInstanceClass: db.t3.micro
-      Engine: postgres
-      EngineVersion: '16.4'
-      AllocatedStorage: 20
-      MaxAllocatedStorage: 100
-      StorageType: gp3
-      StorageEncrypted: true
-      DBName: !Ref DatabaseName
-      MasterUsername: !Ref DatabaseUsername
-      MasterUserPassword: !Ref DatabasePassword
-      VPCSecurityGroups:
-        - !Ref DatabaseSecurityGroup
-      DBSubnetGroupName: !Ref DatabaseSubnetGroup
-      PubliclyAccessible: true
-      MultiAZ: false
-      BackupRetentionPeriod: 7
-      DeletionProtection: false
-      EnablePerformanceInsights: false
-      Tags:
-        - Key: Name
-          Value: canens-prod
-
-  # --------------------------------------------------------------- function
-
-  CanensFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      PackageType: Image
-      Description: Canens API - AI proxy and snapshot backup
-      Metadata:
-        Dockerfile: Dockerfile
-        DockerContext: ../backend
-      VpcConfig:
-        SecurityGroupIds:
-          - !Ref LambdaSecurityGroup
-        SubnetIds:
-          - !Ref PublicSubnetA
-          - !Ref PublicSubnetB
-      ReservedConcurrentExecutions: 1
-      Environment:
-        Variables:
-          DATABASE_URL: !Sub >-
-            postgresql+asyncpg://${DatabaseUsername}:${DatabasePassword}@${Database.Endpoint.Address}:5432/${DatabaseName}
-          API_TOKEN: !Ref ApiToken
-          APP_ENV: production
-          BEDROCK_MODEL_ID: !Ref BedrockModelId
-          ALLOWED_ORIGINS: !Ref AllowedOrigins
-          AWS_REGION: !Ref AWS::Region
-      Policies:
-        - AWSLambdaVPCAccessExecutionRole
-        - Statement:
-            - Sid: BedrockInvoke
-              Effect: Allow
-              Action: bedrock:InvokeModel
-              Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
-            - Sid: Logs
-              Effect: Allow
-              Action:
-                - logs:CreateLogGroup
-                - logs:CreateLogStream
-                - logs:PutLogEvents
-              Resource: '*'
+      TableName: !Sub "canens-ai-usage-${AWS::AccountId}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires
+        Enabled: true
 
   # ------------------------------------------------------------------- api
 
-  CanensApi:
-    Type: AWS::Serverless::HttpApi
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
     Properties:
-      StageName: prod
+      LogGroupName: !Sub '/aws/apigateway/${AWS::StackName}'
+      RetentionInDays: 14
+
+  # Written out as explicit API Gateway resources rather than
+  # AWS::Serverless::HttpApi. The implicit form builds a default stage whose
+  # dependencies CloudFormation reports as a cycle against the function's own
+  # HttpApi events, and the stage is also where throttling has to live.
+  CanensApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: canens-prod
+      ProtocolType: HTTP
       Description: Canens API
+      # CORS belongs to the API, not the stage. API Gateway rejects a request
+      # whose Origin is not listed here before the function is ever reached.
       CorsConfiguration:
         AllowOrigins:
           - !Ref AllowedOrigins
@@ -264,17 +134,135 @@ Resources:
           - Content-Type
           - X-Canens-Token
         MaxAge: 600
-      DefaultRouteSettings:
-        ThrottlingBurstLimit: 10
-        ThrottlingRateLimit: 5
 
-  CanensFunctionPermission:
+  ProxyIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref CanensApi
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+      # 2.0 is what Mangum reads. With 1.0 the stage name is prepended to the
+      # path and FastAPI never matches a route.
+      PayloadFormatVersion: "2.0"
+      IntegrationUri: !GetAtt CanensFunction.Arn
+
+  RootRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref CanensApi
+      RouteKey: "ANY /"
+      Target: !Sub "integrations/${ProxyIntegration}"
+
+  ProxyRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref CanensApi
+      # The greedy route covers /api/health and the AI and backup routes.
+      RouteKey: "ANY /{proxy+}"
+      Target: !Sub "integrations/${ProxyIntegration}"
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    DependsOn:
+      - RootRoute
+      - ProxyRoute
+    Properties:
+      ApiId: !Ref CanensApi
+      # $default, so there is no stage segment in the URL. A named stage is
+      # prepended to the path the function receives, and the greedy route then
+      # hands Mangum "/prod/api/health" and every request 404s in FastAPI.
+      StageName: "$default"
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","stage":"$context.stage","path":"$context.path","routeKey":"$context.routeKey","status":"$context.status"}
+      # Keys are the route keys, not "*": API Gateway rejects a wildcard here
+      # with "Unable to find Route by key *".
+      RouteSettings:
+        "ANY /":
+          ThrottlingBurstLimit: 10
+          ThrottlingRateLimit: 5
+        "ANY /{proxy+}":
+          ThrottlingBurstLimit: 10
+          ThrottlingRateLimit: 5
+
+  ApiPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref CanensFunction
+      FunctionName: !GetAtt CanensFunction.Arn
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CanensApi}/*/*'
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CanensApi}/*/*"
+
+  # --------------------------------------------------------------- function
+
+  CanensFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      Dockerfile: Dockerfile
+      DockerContext: ../backend
+    Properties:
+      PackageType: Image
+      Description: Canens API - AI proxy and snapshot backup
+      # No VpcConfig, deliberately. Nothing here is inside a VPC, so the
+      # function has a public IP and reaches S3, DynamoDB and Bedrock directly.
+      #
+      # No ReservedConcurrentExecutions either: this account's Lambda concurrency
+      # quota is 10, and reserving any of it drops the unreserved pool below the
+      # floor AWS enforces. Request rate is bounded by the API Gateway throttle
+      # above and Bedrock spend by the daily cap, so concurrency is not what the
+      # budget depends on.
+      Environment:
+        Variables:
+          API_TOKEN: !Ref ApiToken
+          APP_ENV: production
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          ALLOWED_ORIGINS: !Ref AllowedOrigins
+          SNAPSHOT_BUCKET: !Ref SnapshotBucket
+          USAGE_TABLE: !Ref UsageTable
+          # No AWS_REGION: Lambda treats it as a reserved key and rejects the
+          # whole update. The runtime already knows its own region.
+      Policies:
+        - Statement:
+            - Sid: BedrockInvoke
+              Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
+            - Sid: Logs
+              Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+            - Sid: Snapshot
+              Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              # Only the snapshots prefix, and only this bucket. The list is a
+              # grant, not a condition, so the role cannot be used to list or
+              # delete anything.
+              Resource: !Sub "${SnapshotBucket.Arn}/snapshots/*"
+            - Sid: SnapshotPrefixListing
+              Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt SnapshotBucket.Arn
+              # Without this, S3 answers a GetObject for a key that does not
+              # exist with 403 AccessDenied instead of 404 NoSuchKey, to avoid
+              # revealing whether an object exists to a caller that cannot list.
+              # The application needs to tell "never backed up" apart from
+              # "no permission", and without this grant it cannot. Scoped to the
+              # one prefix the function already has full read access to.
+              Condition:
+                StringLike:
+                  "s3:prefix": "snapshots/*"
+            - Sid: UsageCounter
+              Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+              Resource: !GetAtt UsageTable.Arn
 
   # ------------------------------------------------------- cost and alarms
 
@@ -284,7 +272,7 @@ Resources:
       Budget:
         BudgetName: canens-monthly
         BudgetLimit:
-          Amount: 25
+          Amount: 5
           Unit: USD
         TimeUnit: MONTHLY
         BudgetType: COST
@@ -299,10 +287,6 @@ Resources:
           Subscribers:
             - SubscriptionType: EMAIL
               Address: !Ref AlertEmail
-
-  AlertEmail:
-    Type: String
-    Description: Email address for the monthly budget alarm.
 
   LambdaErrorAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -319,28 +303,13 @@ Resources:
         - Name: FunctionName
           Value: !Ref CanensFunction
 
-  DatabaseStorageAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: canens-database-storage
-      MetricName: FreeStorageSpace
-      Namespace: AWS/RDS
-      Statistic: Average
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 2000000000
-      ComparisonOperator: LessThanOrEqualToThreshold
-      Dimensions:
-        - Name: DBInstanceIdentifier
-          Value: !Ref Database
-
 Outputs:
   ApiEndpoint:
     Description: Base URL of the Canens API
-    Value: !Sub 'https://${CanensApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
-  DatabaseEndpoint:
-    Description: Hostname of the Postgres instance
-    Value: !GetAtt Database.Endpoint.Address
-  DatabaseSecretArn:
-    Description: Secrets Manager ARN holding the database credentials
-    Value: !Ref DatabaseSecret
+    Value: !Sub 'https://${CanensApi}.execute-api.${AWS::Region}.amazonaws.com'
+  SnapshotBucketName:
+    Description: S3 bucket holding the whole-store snapshot
+    Value: !Ref SnapshotBucket
+  UsageTableName:
+    Description: DynamoDB table holding the daily model-call counter
+    Value: !Ref UsageTable

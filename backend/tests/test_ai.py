@@ -74,24 +74,17 @@ async def test_next_steps_passes_existing_tasks_through(async_client, stub):
     assert existing == [{"title": "One thing", "status": "Pending"}]
 
 
-async def test_next_steps_writes_no_domain_rows(async_client, stub, db_session):
+async def test_next_steps_writes_no_domain_rows(async_client, stub, s3):
     """Generation is a proposal. Nothing is saved until the user accepts it."""
-    from sqlalchemy import func, select
-
-    from app.models import Goal, Task
-
     stub({"status": "more", "tasks": ["Do the thing"]})
 
+    before = dict(s3.objects)
     response = await async_client.post(
         "/api/goals/next-steps", json={"goal_title": "Never stored"}
     )
     assert response.status_code == 200
 
-    goals = (await db_session.execute(select(func.count(Goal.id)))).scalar_one()
-    tasks = (await db_session.execute(select(func.count(Task.id)))).scalar_one()
-
-    assert goals == 0
-    assert tasks == 0
+    assert s3.objects == before, "a model call must not write the snapshot"
 
 
 async def test_provider_failure_is_surfaced_not_substituted(async_client, stub):
@@ -170,17 +163,51 @@ class TestDailyCap:
             )
             assert response.status_code == 200
 
-    async def test_usage_is_recorded_against_today(self, async_client, stub, db_session):
-        from datetime import date
-
-        from sqlalchemy import select
-
-        from app.models import AiUsage
+    async def test_usage_is_recorded_against_today(self, async_client, stub, dynamodb):
+        from app.services.usage import today
 
         stub({"status": "more", "tasks": ["Step"]})
         await async_client.post("/api/goals/next-steps", json={"goal_title": "Anything"})
 
-        rows = (await db_session.execute(select(AiUsage))).scalars().all()
-        assert len(rows) == 1
-        assert rows[0].calls == 1
-        assert rows[0].day == date.today()
+        assert len(dynamodb.updates) == 1
+        update = dynamodb.updates[0]
+        assert update["Key"]["pk"].endswith(f"#{today().isoformat()}")
+        assert dynamodb.items[update["Key"]["pk"]] == 1
+
+    async def test_the_counter_is_one_item_per_user_per_day(
+        self, async_client, stub, dynamodb
+    ):
+        stub({"status": "more", "tasks": ["Step"]})
+        for _ in range(3):
+            await async_client.post(
+                "/api/goals/next-steps", json={"goal_title": "Anything"}
+            )
+
+        assert len(dynamodb.items) == 1
+        assert list(dynamodb.items.values()) == [3]
+
+    async def test_the_limit_is_enforced_by_a_condition_not_a_read(
+        self, async_client, stub, dynamodb
+    ):
+        """The ceiling has to hold under concurrency.
+
+        A read-then-write would let two requests both see calls=1 and both
+        proceed. The update carries the limit as a condition, so the storage
+        layer refuses the one that would exceed it.
+        """
+        stub({"status": "more", "tasks": ["Step"]})
+        await async_client.post("/api/goals/next-steps", json={"goal_title": "Anything"})
+
+        condition = dynamodb.updates[0]["ConditionExpression"]
+        assert "attribute_not_exists" in condition
+        assert ":limit" in condition, condition
+
+    async def test_usage_expires_by_ttl(self, async_client, stub, dynamodb):
+        """One item per day would grow forever without a TTL."""
+        stub({"status": "more", "tasks": ["Step"]})
+        await async_client.post("/api/goals/next-steps", json={"goal_title": "Anything"})
+
+        update = dynamodb.updates[0]
+        expression = update["UpdateExpression"]
+        assert "expires" in expression, expression
+        assert int(update["ExpressionAttributeValues"][":expires"]) > 0

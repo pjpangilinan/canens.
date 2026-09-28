@@ -10,8 +10,6 @@ WORKDIR /var/task
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY alembic.ini ./
-COPY migrations ./migrations
 COPY app ./app
 
 # Lambda provides the AWS_REGION, and credentials arrive through the

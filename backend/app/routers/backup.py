@@ -1,23 +1,17 @@
-import uuid
 from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
 from app.deps import current_user_id, require_token
-from app.models import Backup
+from app.storage import MAX_SNAPSHOT_ROWS, load_snapshot, save_snapshot
 
 router = APIRouter(
     prefix="/api/backup",
     tags=["backup"],
     dependencies=[Depends(require_token)],
 )
-
-MAX_SNAPSHOT_ROWS = 5000
 
 
 class SnapshotIn(BaseModel):
@@ -32,29 +26,19 @@ class SnapshotOut(BaseModel):
     saved_at: datetime | None = None
 
 
+# These two are plain `def`, not `async def`. They call boto3, which blocks, and
+# FastAPI only hands a non-async endpoint to its threadpool. An `async def` here
+# would stall the event loop for the length of the S3 round trip.
 @router.get("", response_model=SnapshotOut)
-async def download_backup(
-    db: AsyncSession = Depends(get_db),
-    user_id: uuid.UUID = Depends(current_user_id),
-) -> SnapshotOut:
-    result = await db.execute(select(Backup).where(Backup.user_id == user_id))
-    backup = result.scalars().first()
-    if backup is None:
+def download_backup(user_id=Depends(current_user_id)) -> SnapshotOut:
+    stored = load_snapshot(str(user_id))
+    if stored is None:
         return SnapshotOut(exists=False)
-    return SnapshotOut(
-        exists=True,
-        goals=backup.goals,
-        tasks=backup.tasks,
-        saved_at=backup.saved_at,
-    )
+    return SnapshotOut(exists=True, **stored)
 
 
 @router.put("", response_model=SnapshotOut)
-async def upload_backup(
-    snapshot: SnapshotIn,
-    db: AsyncSession = Depends(get_db),
-    user_id: uuid.UUID = Depends(current_user_id),
-) -> SnapshotOut:
+def upload_backup(snapshot: SnapshotIn, user_id=Depends(current_user_id)) -> SnapshotOut:
     total = len(snapshot.goals) + len(snapshot.tasks)
     if total > MAX_SNAPSHOT_ROWS:
         raise HTTPException(
@@ -68,20 +52,5 @@ async def upload_backup(
                 status_code=422, detail="Every row needs a string id and a title"
             )
 
-    result = await db.execute(select(Backup).where(Backup.user_id == user_id))
-    backup = result.scalars().first()
-    if backup is None:
-        backup = Backup(user_id=user_id)
-        db.add(backup)
-
-    backup.goals = snapshot.goals
-    backup.tasks = snapshot.tasks
-    await db.commit()
-    await db.refresh(backup)
-
-    return SnapshotOut(
-        exists=True,
-        goals=backup.goals,
-        tasks=backup.tasks,
-        saved_at=backup.saved_at,
-    )
+    saved = save_snapshot(str(user_id), snapshot.goals, snapshot.tasks)
+    return SnapshotOut(exists=True, **saved)

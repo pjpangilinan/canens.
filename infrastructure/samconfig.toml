@@ -7,4 +7,4 @@ warm_containers = "DISABLED"
 stack_name = "canens-prod"
 region = "us-east-1"
 confirm_changeset = false
-capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"
+capabilities = "CAPABILITY_IAM"

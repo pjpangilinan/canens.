@@ -1,31 +1,45 @@
 """Snapshot backup and restore.
 
-Replaces a two-way sync protocol. A snapshot is replaced wholesale, so there
-is no merge and therefore no conflict to get wrong.
+Replaces a two-way sync protocol. A snapshot is replaced wholesale, so there is
+no merge and therefore no conflict to get wrong. It is one S3 object rather than
+a row, so "replaced wholesale" is also literally what happens to the storage.
 """
 import pytest
-from sqlalchemy import select
 
-from app.models import Backup
+from app import storage
+from app.config import MVP_USER_ID
 
 pytestmark = pytest.mark.asyncio
 
+GOAL_ID = "11111111-1111-1111-1111-111111111111"
+TASK_ID = "22222222-2222-2222-2222-222222222222"
+KEY = storage.snapshot_key(MVP_USER_ID)
 
-async def test_download_reports_nothing_before_the_first_upload(async_client):
-    response = await async_client.get("/api/backup")
+
+async def test_download_reports_nothing_before_the_first_upload(empty_client):
+    response = await empty_client.get("/api/backup")
 
     assert response.status_code == 200
     body = response.json()
     assert body["exists"] is False
     assert body["goals"] == []
     assert body["tasks"] == []
+    assert body["saved_at"] is None
 
 
-async def test_snapshot_round_trips(async_client, seed_data):
+async def test_download_returns_what_was_stored(async_client):
+    body = (await async_client.get("/api/backup")).json()
+
+    assert body["exists"] is True
+    assert [g["title"] for g in body["goals"]] == ["Launch the MVP"]
+    assert [t["title"] for t in body["tasks"]] == ["Write the spec"]
+
+
+async def test_snapshot_round_trips(async_client, s3):
     payload = {
         "goals": [
             {
-                "id": "11111111-1111-1111-1111-111111111111",
+                "id": GOAL_ID,
                 "title": "Launch the MVP",
                 "status": "Active",
                 "created_at": "2026-09-01T09:00:00Z",
@@ -34,8 +48,8 @@ async def test_snapshot_round_trips(async_client, seed_data):
         ],
         "tasks": [
             {
-                "id": "22222222-2222-2222-2222-222222222222",
-                "goal_id": "11111111-1111-1111-1111-111111111111",
+                "id": TASK_ID,
+                "goal_id": GOAL_ID,
                 "title": "Write the spec",
                 "status": "Completed",
             }
@@ -44,6 +58,7 @@ async def test_snapshot_round_trips(async_client, seed_data):
 
     upload = await async_client.put("/api/backup", json=payload)
     assert upload.status_code == 200
+    assert upload.json()["goals"] == payload["goals"]
 
     download = await async_client.get("/api/backup")
     assert download.status_code == 200
@@ -55,18 +70,13 @@ async def test_snapshot_round_trips(async_client, seed_data):
     assert body["saved_at"] is not None
 
 
-async def test_upload_replaces_the_previous_snapshot(async_client):
-    first = {
-        "goals": [{"id": "11111111-1111-1111-1111-111111111111", "title": "Old goal"}],
-        "tasks": [],
-    }
-    second = {
-        "goals": [{"id": "33333333-3333-3333-3333-333333333333", "title": "New goal"}],
-        "tasks": [],
-    }
-
-    await async_client.put("/api/backup", json=first)
-    await async_client.put("/api/backup", json=second)
+async def test_upload_replaces_the_previous_snapshot(async_client, s3):
+    await async_client.put(
+        "/api/backup", json={"goals": [{"id": GOAL_ID, "title": "Old goal"}], "tasks": []}
+    )
+    await async_client.put(
+        "/api/backup", json={"goals": [{"id": TASK_ID, "title": "New goal"}], "tasks": []}
+    )
 
     body = (await async_client.get("/api/backup")).json()
     assert [g["title"] for g in body["goals"]] == ["New goal"]
@@ -77,34 +87,12 @@ async def test_deletions_survive_a_round_trip(async_client):
 
     This is why the snapshot needs no tombstone column.
     """
-    await async_client.put(
-        "/api/backup",
-        json={
-            "goals": [
-                {"id": "11111111-1111-1111-1111-111111111111", "title": "Kept"},
-            ],
-            "tasks": [],
-        },
-    )
-    await async_client.put(
-        "/api/backup",
-        json={
-            "goals": [
-                {"id": "11111111-1111-1111-1111-111111111111", "title": "Kept"},
-                {"id": "44444444-4444-4444-4444-444444444444", "title": "Doomed"},
-            ],
-            "tasks": [],
-        },
-    )
-    await async_client.put(
-        "/api/backup",
-        json={
-            "goals": [
-                {"id": "11111111-1111-1111-1111-111111111111", "title": "Kept"},
-            ],
-            "tasks": [],
-        },
-    )
+    kept = {"id": GOAL_ID, "title": "Kept"}
+    doomed = {"id": TASK_ID, "title": "Doomed"}
+
+    await async_client.put("/api/backup", json={"goals": [kept], "tasks": []})
+    await async_client.put("/api/backup", json={"goals": [kept, doomed], "tasks": []})
+    await async_client.put("/api/backup", json={"goals": [kept], "tasks": []})
 
     body = (await async_client.get("/api/backup")).json()
     assert [g["title"] for g in body["goals"]] == ["Kept"]
@@ -113,6 +101,13 @@ async def test_deletions_survive_a_round_trip(async_client):
 async def test_upload_rejects_rows_without_an_id_or_title(async_client):
     response = await async_client.put(
         "/api/backup", json={"goals": [{"title": "no id"}], "tasks": []}
+    )
+    assert response.status_code == 422
+
+
+async def test_upload_rejects_a_row_with_a_non_string_id(async_client):
+    response = await async_client.put(
+        "/api/backup", json={"goals": [{"id": 7, "title": "numeric id"}], "tasks": []}
     )
     assert response.status_code == 422
 
@@ -126,13 +121,57 @@ async def test_upload_rejects_an_oversized_snapshot(async_client):
     assert response.status_code == 413
 
 
-async def test_only_one_snapshot_is_stored_per_user(async_client, db_session):
+async def test_rejected_upload_writes_nothing(async_client, s3):
+    before = dict(s3.objects)
+
     await async_client.put(
-        "/api/backup", json={"goals": [{"id": "1" * 8 + "-0000-0000-0000-000000000000", "title": "A"}], "tasks": []}
-    )
-    await async_client.put(
-        "/api/backup", json={"goals": [{"id": "2" * 8 + "-0000-0000-0000-000000000000", "title": "B"}], "tasks": []}
+        "/api/backup", json={"goals": [{"title": "no id"}], "tasks": []}
     )
 
-    rows = (await db_session.execute(select(Backup))).scalars().all()
-    assert len(rows) == 1
+    assert s3.objects == before
+    assert s3.puts == []
+
+
+async def test_each_upload_writes_the_same_key(async_client, s3):
+    await async_client.put(
+        "/api/backup", json={"goals": [{"id": GOAL_ID, "title": "A"}], "tasks": []}
+    )
+    await async_client.put(
+        "/api/backup", json={"goals": [{"id": TASK_ID, "title": "B"}], "tasks": []}
+    )
+
+    assert [p["key"] for p in s3.puts] == [KEY, KEY]
+    assert len(s3.objects) == 1, "a second object means the key is not derived"
+
+
+async def test_stored_object_is_json_under_the_configured_bucket(async_client, s3):
+    await async_client.put(
+        "/api/backup", json={"goals": [{"id": GOAL_ID, "title": "A"}], "tasks": []}
+    )
+
+    put = s3.puts[-1]
+    assert put["content_type"] == "application/json"
+    assert put["bucket"]
+    assert set(put["body"]) == {"goals", "tasks", "saved_at"}
+
+
+async def test_backup_routes_require_the_token(async_client, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "api_token", "s3cret")
+
+    assert (await async_client.get("/api/backup")).status_code == 401
+    assert (
+        await async_client.put("/api/backup", json={"goals": [], "tasks": []})
+    ).status_code == 401
+
+
+async def test_backup_routes_accept_the_configured_token(async_client, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "api_token", "s3cret")
+
+    response = await async_client.get(
+        "/api/backup", headers={"X-Canens-Token": "s3cret"}
+    )
+    assert response.status_code == 200
