@@ -1,26 +1,38 @@
+"""Create the schema and insert the single MVP user.
+
+Schema creation goes through Alembic rather than ``Base.metadata.create_all``.
+Using ``create_all`` here is what let the migrations and the models drift
+apart unnoticed for as long as they did: it builds whatever the models say and
+reports success either way.
+"""
 import asyncio
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 import uuid
 
-from app.config import settings
-from app.models import Base, User, Goal
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import select
 
-async def seed():
-    engine = create_async_engine(settings.DATABASE_URL)
-    SessionLocal = async_sessionmaker(autocommit=False, autoflush=False, bind=engine)
+from app.config import MVP_USER_ID, settings
+from app.database import SessionLocal
+from app.models import User
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+
+async def seed() -> None:
+    command.upgrade(Config("alembic.ini"), "head")
 
     async with SessionLocal() as session:
-        user = User(id=uuid.uuid4(), email="test@canens.app")
-        goal = Goal(id=uuid.uuid4(), user_id=user.id, title="Launch MVP in 2 weeks", status="Active")
-        
-        session.add(user)
-        session.add(goal)
+        user_id = uuid.UUID(MVP_USER_ID)
+        existing = (
+            await session.execute(select(User).where(User.id == user_id))
+        ).scalars().first()
+        if existing is not None:
+            print("MVP user already present; nothing to seed.")
+            return
+
+        session.add(User(id=user_id, email="owner@canens.app"))
         await session.commit()
-        print("Database seeded with test user and goal.")
+        print(f"Seeded MVP user {user_id} against {settings.database_url}.")
+
 
 if __name__ == "__main__":
     asyncio.run(seed())

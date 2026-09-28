@@ -2,12 +2,30 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: canens_dev
+      POSTGRES_DB: canens
       POSTGRES_USER: canens
       POSTGRES_PASSWORD: canens_dev_pass
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U canens -d canens"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      DATABASE_URL: postgresql+asyncpg://canens:canens_dev_pass@db:5432/canens
+      ALLOWED_ORIGINS: http://localhost:3000
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   pgdata:

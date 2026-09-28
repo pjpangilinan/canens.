@@ -21,9 +21,12 @@ if config.config_file_name is not None:
 # from myapp import mymodel
 from app.config import settings
 from app.database import Base
-from app import models
+from app import models  # noqa: F401  - registers the mappers on Base
 
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# An explicit override (used by the migration tests to target a scratch
+# database) takes precedence over configuration.
+_override = config.attributes.get("canens_database_url")
+config.set_main_option("sqlalchemy.url", _override or settings.database_url)
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,

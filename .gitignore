@@ -1,7 +1,41 @@
+# Secrets - backend/.env holds GROQ/Bedrock credentials and must never be committed.
+# Keep .env.example tracked.
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Node
+node_modules/
+
+# Next.js
+.next/
+out/
+*.tsbuildinfo
+
+# Playwright
+playwright-report/
+test-results/
+blob-report/
+
+# Tooling scratch
+.serena/
+.scratch/e2e/
+
 # IDE / Editor
 .claude/
-CLAUDE.md
-AGENTS.md
 .vscode/
 .idea/
 
