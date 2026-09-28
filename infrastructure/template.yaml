@@ -25,9 +25,13 @@ Parameters:
       real authentication - it ships in the public frontend bundle. It exists to
       slow down casual abuse of a public endpoint, alongside the daily call cap.
   AllowedOrigins:
-    Type: String
+    Type: CommaDelimitedList
     Default: https://pjpangilinan.github.io
-    Description: Comma-separated origins allowed to call the API.
+    Description: >
+      Origins allowed to call the API. A real list, not one string with commas
+      in it: API Gateway matches AllowOrigins by exact string, so a single
+      element of "a,b" matches neither a nor b, and the preflight comes back
+      with no Access-Control-Allow-Origin at all.
   BedrockModelId:
     Type: String
     Default: amazon.nova-lite-v1:0
@@ -77,8 +81,9 @@ Resources:
           - ObjectOwnership: BucketOwnerEnforced
       CorsConfiguration:
         CorsRules:
-          - AllowedOrigins:
-              - !Ref AllowedOrigins
+          # Already a list, so it is used directly rather than wrapped in
+          # another one.
+          - AllowedOrigins: !Ref AllowedOrigins
             AllowedMethods: [GET, PUT]
             AllowedHeaders: [Content-Type]
             MaxAge: 3000
@@ -123,8 +128,7 @@ Resources:
       # CORS belongs to the API, not the stage. API Gateway rejects a request
       # whose Origin is not listed here before the function is ever reached.
       CorsConfiguration:
-        AllowOrigins:
-          - !Ref AllowedOrigins
+        AllowOrigins: !Ref AllowedOrigins
         AllowMethods:
           - GET
           - POST
@@ -218,7 +222,9 @@ Resources:
           API_TOKEN: !Ref ApiToken
           APP_ENV: production
           BEDROCK_MODEL_ID: !Ref BedrockModelId
-          ALLOWED_ORIGINS: !Ref AllowedOrigins
+          # The application splits this on commas, so it needs a string rather
+          # than the list the parameter holds.
+          ALLOWED_ORIGINS: !Join [",", !Ref AllowedOrigins]
           SNAPSHOT_BUCKET: !Ref SnapshotBucket
           USAGE_TABLE: !Ref UsageTable
           # No AWS_REGION: Lambda treats it as a reserved key and rejects the
