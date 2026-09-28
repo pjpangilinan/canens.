@@ -1,12 +1,15 @@
 fastapi
 uvicorn[standard]
-sqlalchemy[asyncio]
-asyncpg
-alembic
 pydantic
 pydantic-settings
 boto3
 mangum
+# The Lambda Runtime Interface Client. A container image cannot use an exec
+# form CMD to name a Python attribute - Lambda starts it as a process - so the
+# image runs the RIC, which is what speaks the Runtime API. Pinned because this
+# is the container entrypoint: a silent major bump here breaks every deploy in
+# a way that only shows up as Runtime.InvalidEntrypoint.
+awslambdaric==4.0.4
 httpx
 pytest
 pytest-asyncio
