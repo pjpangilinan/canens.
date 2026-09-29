@@ -306,15 +306,19 @@ export function useAuth(): {
     setSession(null);
   }, []);
 
-  // Reading the session touches window, so it cannot happen while rendering on
-  // the server. Doing it on the first client render rather than in an effect
-  // avoids the extra commit an effect costs - this is the adjustment React
-  // documents for once-a-mount reads, and it settles before the first paint,
-  // so there is no flash of the signed-out screen.
-  if (!loaded && typeof window !== "undefined") {
-    setLoaded(true);
+  // The session lives in sessionStorage, which does not exist while the server
+  // renders, so the first render has to say "loading" on both sides. Reading it
+  // during render would fix that and break hydration instead: the client's
+  // first pass would disagree with the server's HTML and React would throw
+  // error 418. The read therefore has to wait for the effect, which is the case
+  // the set-state-in-effect rule is aimed away from - it is about cascading
+  // renders, and this is a one-time read of storage the server never sees.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
     setSession(readSession());
-  }
+    setLoaded(true);
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     if (!session) return;
