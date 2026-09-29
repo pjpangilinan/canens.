@@ -292,4 +292,58 @@ test.describe("Canens", () => {
     await page.getByRole("button", { name: "Cancel" }).click();
     await expect(page.getByRole("heading", { name: "Delete Account and Data?" })).toBeHidden();
   });
+
+  test("search bar supports Escape key and clear button", async ({ page }) => {
+    const goalTitle = `Searchable ${Date.now()}`;
+    await page.getByLabel("New goal").fill(goalTitle);
+    await page.getByLabel("New goal").press("Enter");
+    await expect(page.getByRole("heading", { name: goalTitle })).toBeVisible();
+
+    const searchInput = page.getByLabel("Search goals and steps");
+    await searchInput.fill("nonexistent-filter-query");
+    await expect(page.getByRole("heading", { name: goalTitle })).toBeHidden();
+
+    // Escape clears search and brings goal back into view
+    await searchInput.press("Escape");
+    await expect(searchInput).toHaveValue("");
+    await expect(page.getByRole("heading", { name: goalTitle })).toBeVisible();
+
+    // Fill again and use Clear button
+    await searchInput.fill("nonexistent-filter-query");
+    await expect(page.getByRole("heading", { name: goalTitle })).toBeHidden();
+    await page.getByRole("button", { name: "Clear search" }).click();
+    await expect(searchInput).toHaveValue("");
+    await expect(page.getByRole("heading", { name: goalTitle })).toBeVisible();
+  });
+
+  test("goal input supports Escape key to clear draft", async ({ page }) => {
+    const goalInput = page.getByLabel("New goal");
+    await goalInput.fill("Discarded Goal Draft");
+    await expect(goalInput).toHaveValue("Discarded Goal Draft");
+    await goalInput.press("Escape");
+    await expect(goalInput).toHaveValue("");
+  });
+
+  test("activity log supports permanent goal deletion", async ({ page }) => {
+    const goalTitle = `To Archive and Delete ${Date.now()}`;
+    await page.getByLabel("New goal").fill(goalTitle);
+    await page.getByLabel("New goal").press("Enter");
+    await expect(page.getByRole("heading", { name: goalTitle })).toBeVisible();
+
+    // Complete the goal from home
+    await page.getByRole("button", { name: "Complete goal" }).click();
+    await expect(page.getByRole("heading", { name: goalTitle })).toBeHidden();
+
+    // Navigate to activity log
+    await page.getByRole("link", { name: "Activity Log" }).click();
+    await expect(page.getByRole("heading", { name: goalTitle })).toBeVisible();
+
+    // Permanently delete from activity log
+    await page.getByRole("button", { name: `Permanently delete "${goalTitle}"` }).click();
+    await expect(page.getByRole("heading", { name: goalTitle })).toBeHidden();
+
+    // Return to home, verify goal is not in active list
+    await page.getByRole("link", { name: "Home" }).click();
+    await expect(page.getByRole("heading", { name: goalTitle })).toBeHidden();
+  });
 });

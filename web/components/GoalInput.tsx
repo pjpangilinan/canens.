@@ -32,6 +32,9 @@ export default function GoalInput({ onSubmit, onError }: GoalInputProps) {
         type="text"
         value={title}
         onChange={(e) => setTitle(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") setTitle("");
+        }}
         placeholder="What is your next goal?"
         aria-label="New goal"
         maxLength={500}

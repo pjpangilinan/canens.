@@ -89,6 +89,9 @@ def next_steps_stream(
         except ProviderError as exc:
             refund_call(user_id)
             yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+        except Exception:
+            refund_call(user_id)
+            yield f"event: error\ndata: {json.dumps({'detail': 'An unexpected error occurred while generating steps.'})}\n\n"
 
     return StreamingResponse(
         event_stream(),

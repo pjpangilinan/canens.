@@ -25,6 +25,7 @@ export default function Onboarding({ onCreateGoal, onError }: OnboardingProps) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [suggestions, setSuggestions] = useState<string[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const [addingTitle, setAddingTitle] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const answered = QUESTIONS.filter((q) => (answers[q.id] ?? "").trim()).length;
@@ -85,10 +86,19 @@ export default function Onboarding({ onCreateGoal, onError }: OnboardingProps) {
           {suggestions.map((title) => (
             <button
               key={title}
-              onClick={() => void onCreateGoal(title)}
-              className="text-left bg-surface border border-primary/20 hover:border-primary/60 rounded-xl p-4 transition-colors"
+              disabled={addingTitle !== null}
+              onClick={async () => {
+                if (addingTitle !== null) return;
+                setAddingTitle(title);
+                try {
+                  await onCreateGoal(title);
+                } finally {
+                  setAddingTitle(null);
+                }
+              }}
+              className="text-left bg-surface border border-primary/20 hover:border-primary/60 rounded-xl p-4 transition-colors disabled:opacity-50"
             >
-              <span className="text-foreground">{title}</span>
+              <span className="text-foreground">{addingTitle === title ? "Adding..." : title}</span>
             </button>
           ))}
         </div>

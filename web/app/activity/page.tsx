@@ -7,8 +7,8 @@ import SearchBar from "../../components/SearchBar";
 import SignIn from "../../components/SignIn";
 import { useAuth } from "../../lib/auth";
 import { isApiConfigured } from "../../lib/config";
-import { scheduleBackup } from "../../lib/backup";
-import { reopenGoal, timestampOf } from "../../lib/store";
+import { flushBackupNow, scheduleBackup } from "../../lib/backup";
+import { deleteGoal, reopenGoal, timestampOf } from "../../lib/store";
 
 interface DayGroup {
   /** Sortable key, e.g. 2026-10-01. Never rendered. */
@@ -129,9 +129,9 @@ export default function ActivityLog() {
             <h1 className="text-3xl font-extrabold text-foreground tracking-tight">
               Activity Log
             </h1>
-            {session?.email && (
+            {(session?.email || status === "unconfigured") && (
               <div className="flex items-center gap-3 text-xs text-muted/70">
-                <span className="truncate max-w-[14rem]">{session.email}</span>
+                <span className="truncate max-w-[14rem]">{session?.email || "Local preview"}</span>
                 <button onClick={signOut} className="underline hover:text-foreground shrink-0">
                   Sign out
                 </button>
@@ -174,18 +174,27 @@ export default function ActivityLog() {
                     <li key={goal.id} className="bg-surface rounded-xl border border-white/5 p-4">
                       <div className="flex items-start justify-between gap-3">
                         <h3 className="text-foreground font-medium">{goal.title}</h3>
-                        {/* Archiving is not a one-way door. Completing the last
-                            step removes the goal card entirely, so this is the
-                            only way back. */}
-                        <button
-                          onClick={() => {
-                            void reopenGoal(goal.id);
-                            scheduleBackup();
-                          }}
-                          className="text-xs text-muted hover:text-primary transition-colors shrink-0"
-                        >
-                          Reopen
-                        </button>
+                        <div className="flex items-center gap-3 shrink-0">
+                          <button
+                            onClick={() => {
+                              void reopenGoal(goal.id);
+                              scheduleBackup();
+                            }}
+                            className="text-xs text-muted hover:text-primary transition-colors"
+                          >
+                            Reopen
+                          </button>
+                          <button
+                            onClick={() => {
+                              flushBackupNow();
+                              void deleteGoal(goal.id);
+                            }}
+                            className="text-xs text-red-400/70 hover:text-red-400 transition-colors"
+                            aria-label={`Permanently delete "${goal.title}"`}
+                          >
+                            Delete
+                          </button>
+                        </div>
                       </div>
                       {goal.tasks.length > 0 ? (
                         <ul className="mt-3 space-y-2 pl-4 border-l-2 border-white/5">

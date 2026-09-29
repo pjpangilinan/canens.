@@ -345,7 +345,7 @@ export async function restoreIfEmpty(
 
   if (!force && hasEverBackedUp()) return "declined-because-previously-synced";
 
-  await db.transaction("rw", db.goals, db.tasks, db.backup_meta, async () => {
+  await db.transaction("rw", db.goals, db.tasks, db.tombstones, db.backup_meta, async () => {
     await db.goals.bulkPut(
       goals.map((g) => ({
         ...g,
@@ -360,6 +360,12 @@ export async function restoreIfEmpty(
         status: t.status === TaskStatus.COMPLETED ? TaskStatus.COMPLETED : TaskStatus.PENDING,
       })),
     );
+    const tombstones = body.tombstones ?? {};
+    if (Object.keys(tombstones).length > 0) {
+      await db.tombstones.bulkPut(
+        Object.entries(tombstones).map(([id, deleted_at]) => ({ id, deleted_at: String(deleted_at) })),
+      );
+    }
     await setMeta({ saved_at: body.saved_at ?? null, last_error: null });
   });
 
