@@ -1,7 +1,7 @@
 """Test fixtures.
 
 There is no database. The two pieces of server state are an S3 object and a
-DynamoDB item, and both are faked at the boto3 client boundary - the same seam
+DynamoDB table, and both are faked at the boto3 client boundary - the same seam
 test_bedrock.py stubs for Bedrock. The fakes hold real state so a round trip is
 a real round trip, and they record the parameters that were sent so a test can
 assert on the request, not only on the response.
@@ -13,18 +13,20 @@ import json
 import os
 from io import BytesIO
 
-import boto3
 import pytest
 import pytest_asyncio
 from botocore.exceptions import ClientError
 from httpx import ASGITransport, AsyncClient
 
 from app import storage
-from app.config import MVP_USER_ID
 from app.main import app
 from app.services import usage
 
 USE_REAL_AWS = os.environ.get("CANENS_TEST") == "1"
+
+#: The subject API Gateway would have verified and put in the request header.
+TEST_USER = "11111111-1111-1111-1111-111111111111"
+OTHER_USER = "22222222-2222-2222-2222-222222222222"
 
 SEEDED_GOALS = [{"id": "goal-1", "title": "Launch the MVP"}]
 SEEDED_TASKS = [
@@ -56,7 +58,7 @@ class FakeS3:
 
 
 class FakeDynamoDB:
-    """Implements the conditional counter, and records the parameters.
+    """A conditional counter plus the account record, and the parameters seen.
 
     Two things here are deliberate and were both learned the hard way:
 
@@ -70,8 +72,27 @@ class FakeDynamoDB:
     """
 
     def __init__(self) -> None:
-        self.items: dict[str, int] = {}
+        self.items: dict[str, dict] = {}
         self.updates: list[dict] = []
+
+    def get_item(self, Key, **kwargs):  # noqa: N803
+        item = self.items.get(Key["pk"])
+        return {"Item": dict(item)} if item else {}
+
+    def put_item(self, Item, ConditionExpression=None, **kwargs):  # noqa: N803
+        key = Item["pk"]
+        if ConditionExpression and key in self.items:
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "ConditionalCheckFailedException",
+                        "Message": "The conditional request failed",
+                    }
+                },
+                "PutItem",
+            )
+        self.items[key] = dict(Item)
+        return {}
 
     def update_item(self, **kwargs):
         for name, value in kwargs["ExpressionAttributeValues"].items():
@@ -87,8 +108,8 @@ class FakeDynamoDB:
         self.updates.append(kwargs)
         key = kwargs["Key"]["pk"]
         limit = kwargs["ExpressionAttributeValues"][":limit"]
-        current = self.items.get(key, 0)
-        if current >= limit:
+        calls = self.items.get(key, {}).get("calls", 0)
+        if calls >= limit:
             raise ClientError(
                 {
                     "Error": {
@@ -98,8 +119,12 @@ class FakeDynamoDB:
                 },
                 "UpdateItem",
             )
-        self.items[key] = current + 1
-        return {"Attributes": {"calls": current + 1}}
+        merged = {**self.items.get(key, {}), "calls": calls + 1}
+        self.items[key] = merged
+        return {"Attributes": {"calls": merged["calls"]}}
+
+    def calls_for(self, key: str) -> int:
+        return self.items.get(key, {}).get("calls", 0)
 
 
 @pytest.fixture
@@ -124,25 +149,50 @@ def dynamodb():
         usage._client = None
 
 
+def _client_for(store, user: str):
+    """An HTTP client that presents itself as a signed-in user."""
+    return AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"x-canens-user": user},
+    )
+
+
 @pytest_asyncio.fixture
 async def async_client(s3, dynamodb):
-    """An HTTP client over the app, with AWS faked and one snapshot already stored."""
-    s3.objects[storage.snapshot_key(MVP_USER_ID)] = {
+    """Signed in, with one snapshot already stored."""
+    s3.objects[storage.snapshot_key(TEST_USER)] = {
         "goals": SEEDED_GOALS,
         "tasks": SEEDED_TASKS,
         "saved_at": "2026-01-01T00:00:00+00:00",
     }
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with _client_for(s3, TEST_USER) as client:
         yield client
 
 
 @pytest_asyncio.fixture
 async def empty_client(s3, dynamodb):
-    """The same, with nothing stored yet."""
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    """Signed in, with nothing stored yet: a user on their first visit."""
+    async with _client_for(s3, TEST_USER) as client:
         yield client
 
 
-@pytest.fixture(scope="session")
-def aws_region():
-    return boto3.session.Session().region_name or "us-east-1"
+@pytest_asyncio.fixture
+async def anonymous_client(s3, dynamodb):
+    """No identity header at all, which is what an unsigned-in browser sends."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        yield client
+
+
+@pytest_asyncio.fixture
+async def other_user_client(s3, dynamodb):
+    """A different signed-in user, sharing the same server."""
+    s3.objects[storage.snapshot_key(OTHER_USER)] = {
+        "goals": [{"id": "goal-9", "title": "Someone else's goal"}],
+        "tasks": [],
+        "saved_at": "2026-01-01T00:00:00+00:00",
+    }
+    async with _client_for(s3, OTHER_USER) as client:
+        yield client

@@ -7,13 +7,14 @@ a row, so "replaced wholesale" is also literally what happens to the storage.
 import pytest
 
 from app import storage
-from app.config import MVP_USER_ID
+from tests.conftest import TEST_USER
 
 pytestmark = pytest.mark.asyncio
 
+KEY = storage.snapshot_key(TEST_USER)
+
 GOAL_ID = "11111111-1111-1111-1111-111111111111"
 TASK_ID = "22222222-2222-2222-2222-222222222222"
-KEY = storage.snapshot_key(MVP_USER_ID)
 
 
 async def test_download_reports_nothing_before_the_first_upload(empty_client):
@@ -154,24 +155,3 @@ async def test_stored_object_is_json_under_the_configured_bucket(async_client, s
     assert put["bucket"]
     assert set(put["body"]) == {"goals", "tasks", "saved_at"}
 
-
-async def test_backup_routes_require_the_token(async_client, monkeypatch):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "api_token", "s3cret")
-
-    assert (await async_client.get("/api/backup")).status_code == 401
-    assert (
-        await async_client.put("/api/backup", json={"goals": [], "tasks": []})
-    ).status_code == 401
-
-
-async def test_backup_routes_accept_the_configured_token(async_client, monkeypatch):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "api_token", "s3cret")
-
-    response = await async_client.get(
-        "/api/backup", headers={"X-Canens-Token": "s3cret"}
-    )
-    assert response.status_code == 200

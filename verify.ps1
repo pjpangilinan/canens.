@@ -39,6 +39,44 @@ function Section($name) {
   Write-Output "=============================================================="
 }
 
+# Assert that nothing matches a pattern.
+#
+# Select-String always exits 0, so a step that merely ran it passed whatever it
+# found - two of these checks were decorative until this function existed. The
+# patterns are code, never prose: a comment explaining why the database is gone
+# is the point of the change, not a violation of it.
+function NoMatch($name, $dirs, $include, $pattern) {
+  $files = @()
+  foreach ($d in $dirs) {
+    $files += Get-ChildItem -Recurse -Include $include -Path $d -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -notmatch '__pycache__|node_modules|\.next|\\out\\|\.aws-sam' }
+  }
+
+  # An empty list used to reach Select-String with a null path, which throws,
+  # and the throw was then read as a pass. A check that looked at no files has
+  # checked nothing.
+  if ($files.Count -eq 0) {
+    Write-Output "  !!! FAILED: $name - it looked at no files, so it checked nothing"
+    $script:failures.Add($name)
+    return
+  }
+
+  $hits = @(
+    Select-String -Path $files.FullName -Pattern $pattern -ErrorAction SilentlyContinue
+  ) | Where-Object { $_ -ne $null }
+
+  if ($hits.Count -gt 0) {
+    Write-Output "  !!! $name matched, which it must not:"
+    $hits | Select-Object -First 8 | ForEach-Object {
+      Write-Output "      $(Split-Path $_.Path -Leaf):$($_.LineNumber): $($_.Line.Trim())"
+    }
+    $script:failures.Add($name)
+    Write-Output "  !!! FAILED: $name"
+  } else {
+    Write-Output "  ok: $name ($($files.Count) files)"
+  }
+}
+
 $backend = Join-Path $root "backend"
 $web = Join-Path $root "web"
 
@@ -50,8 +88,16 @@ Write-Output "AI tests: $(if ($SkipAI) { 'skipped' } else { 'enabled' })"
 Section "Backend"
 Step "all modules import" $backend ".\venv\Scripts\python.exe -c `"import app.main, app.deps, app.schemas, app.storage, app.services.bedrock, app.services.usage, app.routers.ai, app.routers.backup, app.lambda_handler; print('ok')`""
 Step "full backend suite" $backend ".\venv\Scripts\python.exe -m pytest -q"
-Step "no live references to removed modules" $backend "Select-String -Path (Get-ChildItem -Recurse -Include *.py -Path app,tests | ForEach-Object FullName) -Pattern 'services\.llm|websocket|sync_engine|routers\.sync|routers\.goals|routers\.tasks|requires_high_energy|EnergyLevel|WorkBlockStatus|api\.groq|OLLAMA_BASE_URL|GROQ_API_KEY|sqlalchemy|asyncpg|alembic|get_db|DATABASE_URL' -ErrorAction SilentlyContinue"
-Step "no live references to the removed database" $backend "Select-String -Path (Get-ChildItem -Recurse -Include *.py,*.txt,*.ini -Path app,tests | ForEach-Object FullName) -Pattern 'models|database|seed|migrate' -ErrorAction SilentlyContinue | Where-Object { `$_.Path -notmatch '__pycache__' }"
+# Absolute paths, because NoMatch is called from the repository root and the
+# directories it looks in are under backend/ and web/. A relative "app" resolves
+# to nothing, the file list comes back empty, and the check passes vacuously -
+# which is exactly what it did before this was caught.
+# Patterns target imports and attribute access, not the words. A test that
+# asserts the Dockerfile no longer copies alembic.ini has to name it, and
+# flagging that would make the check impossible to satisfy.
+NoMatch "no live references to removed modules" @((Join-Path $backend "app"), (Join-Path $backend "tests")) "*.py" '^\s*(from|import)\s+(sqlalchemy|asyncpg|alembic|app\.(models|database|seed|migrate))|\bget_db\b|\bDATABASE_URL\b'
+NoMatch "no code from the removed database" @((Join-Path $backend "app")) "*.py" '^\s*(from|import)\s+app\.(models|database|seed|migrate)\b'
+NoMatch "no shared token in the client" @((Join-Path $web "app"), (Join-Path $web "components"), (Join-Path $web "lib")) @("*.ts", "*.tsx") 'X-Canens-Token|api_token'
 Step "bedrock stop reasons match the real enum" $backend ".\venv\Scripts\python.exe -c `"import gzip,json,os,pathlib,botocore; base=os.path.join(os.path.dirname(botocore.__file__),'data','bedrock-runtime','2023-09-30'); m=json.loads(gzip.open(os.path.join(base,'service-2.json.gz'),'rt',encoding='utf-8').read()); op=m['operations']['Converse']; out=m['shapes'][op['output']['shape']]; enum=set(m['shapes'][out['members']['stopReason']['shape']]['enum']); src=pathlib.Path('app/services/bedrock.py').read_text(); import re; used=set(re.findall(r'==\s*.(max_tokens|end_turn|tool_use|stop_sequence|guardrail_intervened|content_filtered|malformed_model_output|malformed_tool_use|model_context_window_exceeded).', src)); assert used <= enum, f'code compares against values Bedrock never returns: {used-enum}'; print('compares only against real stop reasons:', sorted(used))`""
 
 Section "Web"
@@ -60,7 +106,10 @@ Step "typecheck" $web "npm run typecheck"
 Step "unit tests" $web "npm test"
 Step "static export build" $web "npm run build"
 Step "export emits directory indexes" $web "if (Test-Path out\index.html) { if (Test-Path out\activity\index.html) { 'index.html and activity/index.html present' } else { throw 'activity/index.html missing' } } else { throw 'index.html missing' }"
-Step "no source outside basePath-sensitive patterns" $web "Select-String -Path (Get-ChildItem -Recurse -Include *.tsx,*.ts -Path app,components,lib | ForEach-Object FullName) -Pattern 'fetch\(`/api|href=\"/|src=\"/' -ErrorAction SilentlyContinue"
+# Raw anchors and raw fetches only. next/link and next/image prepend basePath
+# themselves, so href="/" on a <Link> is correct; a plain <a href="/"> is not
+# and silently 404s on GitHub Pages, which is what this is watching for.
+NoMatch "no paths that bypass basePath" @((Join-Path $web "app"), (Join-Path $web "components"), (Join-Path $web "lib")) @("*.tsx", "*.ts") '<a\s+href="/|fetch\(\s*[`''"]/api|\bsrc="/'
 
 Section "End to end, no backend"
 Remove-Item Env:CANENS_E2E_API -ErrorAction SilentlyContinue

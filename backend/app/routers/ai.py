@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.deps import enforce_daily_ai_cap, require_token
+from app.deps import enforce_daily_ai_cap, require_user
 from app.services.bedrock import ProviderError, bedrock
 
-router = APIRouter(prefix="/api", tags=["ai"], dependencies=[Depends(require_token)])
+router = APIRouter(prefix="/api", tags=["ai"], dependencies=[Depends(require_user)])
 
 
 class ExistingTask(BaseModel):

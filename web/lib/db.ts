@@ -92,8 +92,12 @@ db.version(4)
   });
 
 /**
- * Single-user MVP. Real accounts are out of scope, but the id is stored on
- * every record and used in every query so adding them later is a matter of
- * changing where this value comes from.
+ * The local record owner.
+ *
+ * The browser holds one user's data, so the id on every row is a constant
+ * rather than something derived from a session. It is kept because the backup
+ * and the server both key storage by the account's Cognito subject, and having
+ * a matching local field means a row can always be traced back to the account
+ * that uploaded it.
  */
 export const USER_ID = "00000000-0000-0000-0000-000000000000";

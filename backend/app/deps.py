@@ -1,57 +1,50 @@
-import secrets
 import uuid
 
 from fastapi import Depends, Header, HTTPException, status
 
-from app.config import MVP_USER_ID, settings
 from app.services.usage import DailyCapReached, reserve_call
 
 
-async def require_token(
-    x_canens_token: str | None = Header(default=None),
-) -> None:
-    """Guard the routes that cost money or hold data.
+async def require_user(
+    x_canens_user: str | None = Header(default=None),
+) -> uuid.UUID:
+    """The authenticated user, from the subject API Gateway verified.
 
-    This is not authentication. The token is inlined into the client bundle,
-    so anyone who can load the page has it. It exists to stop casual abuse of
-    a public endpoint, and must be paired with the daily call cap below and
-    an account-level budget alarm.
+    The header is set by app/lambda_handler.py from the JWT claims and is
+    overwritten on every invocation, so a caller cannot forge it. A request that
+    reaches the function without a valid token never gets here - the authorizer
+    rejects it first - so a missing header means the function was invoked
+    without one, which is a configuration mistake rather than a hostile request.
+    It is refused either way.
     """
-    if settings.api_token is None:
-        return
-    if not x_canens_token or not x_canens_token.isascii():
-        # compare_digest raises TypeError on non-ASCII str operands, and
-        # Starlette decodes header bytes as latin-1, so a request carrying a
-        # high byte would otherwise turn a 401 into a 500.
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    if not secrets.compare_digest(x_canens_token.encode(), settings.api_token.encode()):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-
-
-async def current_user_id() -> uuid.UUID:
-    """The single MVP user.
-
-    Real accounts are out of scope. The id is still threaded through every
-    store key so that adding them later is not a data migration.
-    """
-    return uuid.UUID(MVP_USER_ID)
+    if not x_canens_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Not signed in"
+        )
+    try:
+        return uuid.UUID(x_canens_user)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Not signed in"
+        ) from None
 
 
 def enforce_daily_ai_cap(
-    user_id: uuid.UUID = Depends(current_user_id),
+    user_id: uuid.UUID = Depends(require_user),
 ) -> None:
-    """Reserve one model call, refusing once the day's allowance is spent.
+    """Reserve one model call, refusing once today's allowance is spent.
 
-    The reservation is committed before the model is called: a refused request
-    costs nothing, and a call that then fails still consumed an attempt, which
-    is the behaviour you want from a ceiling.
+    The allowance depends on how old the account is, because sign-up is open and
+    every new account is a stranger. The reservation is made before the model is
+    called: a refused request costs nothing, and a call that then fails has still
+    consumed an attempt, which is the behaviour you want from a ceiling.
 
     Sync on purpose. boto3 blocks, and FastAPI only runs a dependency in its
     threadpool when it is a plain ``def``; as ``async def`` it would block the
     event loop for the length of the DynamoDB round trip.
     """
     try:
-        reserve_call(str(user_id), settings.ai_daily_cap)
+        reserve_call(user_id)
     except DailyCapReached as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)

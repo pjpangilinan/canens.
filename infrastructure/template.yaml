@@ -16,14 +16,13 @@ Description: >
   $0.02/month.
 
 Parameters:
-  ApiToken:
+  FrontendOrigin:
     Type: String
-    NoEcho: true
-    MinLength: 24
+    Default: https://pjpangilinan.github.io
     Description: >
-      Shared secret the API requires in the X-Canens-Token header. This is not
-      real authentication - it ships in the public frontend bundle. It exists to
-      slow down casual abuse of a public endpoint, alongside the daily call cap.
+      Where the site is served from, without a trailing slash. Cognito redirects
+      back here after sign-in, so this has to be the deployed site and nothing
+      else. AllowedOrigins below must include it.
   AllowedOrigins:
     Type: CommaDelimitedList
     Default: https://pjpangilinan.github.io
@@ -107,6 +106,108 @@ Resources:
         AttributeName: expires
         Enabled: true
 
+  # ------------------------------------------------------------------- auth
+
+  # Sign-up is open. The daily model-call allowance starts small and ramps over
+  # the first few days, so an account created to try the app cannot cost
+  # anything meaningful, which is a better place to spend the constraint than
+  # gating registration.
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: canens-users
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      MfaConfiguration: "OFF"
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 2
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: false
+
+  # A public client: no secret, because the browser cannot keep one. The
+  # authorization code flow with PKCE is what makes that safe, and it is why
+  # there is no client secret to configure or leak.
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: canens-web
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      # Must be true or AllowedOAuthFlows, CallbackURLs, LogoutURLs and the
+      # scopes are all ignored and only SDK sign-in is permitted - which would
+      # leave the hosted UI unreachable with no error anywhere.
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      CallbackURLs:
+        - !Sub "${FrontendOrigin}/"
+        - http://localhost:3000/
+      LogoutURLs:
+        - !Sub "${FrontendOrigin}/"
+        - http://localhost:3000/
+      SupportedIdentityProviders:
+        - COGNITO
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+        # Username and password, for anything that is not a browser: the
+        # screenshot walkthrough needs a token, and there is no way to drive a
+        # hosted-UI redirect from a script. The browser itself uses the `code`
+        # flow above and never touches this.
+        - ALLOW_USER_PASSWORD_AUTH
+      # Do not reveal whether an account exists, so the sign-in form cannot be
+      # used to enumerate who has signed up.
+      PreventUserExistenceErrors: ENABLED
+      RefreshTokenValidity: 30
+      # Said out loud, because the default unit for an access token is hours and
+      # for a refresh token days, and the two numbers below only make sense with
+      # the units attached. Cognito rejects the pair outright as an invalid
+      # range otherwise.
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      AccessTokenValidity: 1
+
+  # Validates the signature, issuer, expiry and audience before the function is
+  # invoked at all, and hands the function the verified claims. The function
+  # therefore does no cryptography: it reads the subject out of the event.
+  CognitoAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      Name: canens-cognito
+      ApiId: !Ref CanensApi
+      # The HTTP API spelling is JWT here, and JwtConfiguration rather than
+      # JWTConfiguration. Both are required: without ApiId the authorizer is not
+      # attached to the API, and API Gateway then rejects the route.
+      AuthorizerType: JWT
+      IdentitySource:
+        - $request.header.Authorization
+      JwtConfiguration:
+        Audience:
+          - !Ref UserPoolClient
+        Issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+
   # ------------------------------------------------------------------- api
 
   ApiLogGroup:
@@ -125,20 +226,13 @@ Resources:
       Name: canens-prod
       ProtocolType: HTTP
       Description: Canens API
-      # CORS belongs to the API, not the stage. API Gateway rejects a request
-      # whose Origin is not listed here before the function is ever reached.
-      CorsConfiguration:
-        AllowOrigins: !Ref AllowedOrigins
-        AllowMethods:
-          - GET
-          - POST
-          - PUT
-          - OPTIONS
-        AllowHeaders:
-          - Content-Type
-          - X-Canens-Token
-        MaxAge: 600
 
+  # CORS is the application's, not API Gateway's. A preflight is an OPTIONS, it
+  # matches the greedy route below, and the JWT authorizer runs before any
+  # automatic CORS response - so a browser asking permission to send a bearer
+  # token gets a 401 and the request never leaves. Preflight therefore gets its
+  # own unauthenticated routes, and CORSMiddleware in main.py answers. One
+  # owner for the policy, and it is testable without deploying.
   ProxyIntegration:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
@@ -150,19 +244,52 @@ Resources:
       PayloadFormatVersion: "2.0"
       IntegrationUri: !GetAtt CanensFunction.Arn
 
+  # Health is deliberately the one unauthenticated route, so an uptime check
+  # needs no token and cannot be turned into a way to spend money. It returns
+  # nothing but a word. An explicit path beats the greedy route below, so
+  # GET /api/health lands here rather than being authenticated.
+  HealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref CanensApi
+      RouteKey: "GET /api/health"
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${ProxyIntegration}"
+
+  PreflightRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref CanensApi
+      RouteKey: "OPTIONS /{proxy+}"
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${ProxyIntegration}"
+
+  PreflightRootRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref CanensApi
+      RouteKey: "OPTIONS /"
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${ProxyIntegration}"
+
   RootRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref CanensApi
       RouteKey: "ANY /"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
       Target: !Sub "integrations/${ProxyIntegration}"
 
   ProxyRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref CanensApi
-      # The greedy route covers /api/health and the AI and backup routes.
+      # The greedy route covers the AI and snapshot routes, and both need a
+      # valid token.
       RouteKey: "ANY /{proxy+}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
       Target: !Sub "integrations/${ProxyIntegration}"
 
   ApiStage:
@@ -219,8 +346,6 @@ Resources:
       # budget depends on.
       Environment:
         Variables:
-          API_TOKEN: !Ref ApiToken
-          APP_ENV: production
           BEDROCK_MODEL_ID: !Ref BedrockModelId
           # The application splits this on commas, so it needs a string rather
           # than the list the parameter holds.
@@ -267,7 +392,14 @@ Resources:
             - Sid: UsageCounter
               Effect: Allow
               Action:
+                # UpdateItem is the conditional increment. GetItem and PutItem
+                # are the account record that dates the user's first call, which
+                # is what the daily allowance is ramped against. Leaving either
+                # off fails only on a request that reaches the model, with an
+                # opaque ClientError.
                 - dynamodb:UpdateItem
+                - dynamodb:GetItem
+                - dynamodb:PutItem
               Resource: !GetAtt UsageTable.Arn
 
   # ------------------------------------------------------- cost and alarms

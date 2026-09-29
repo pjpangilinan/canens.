@@ -135,7 +135,7 @@ class TestDailyCap:
             assert response.status_code == 200
 
     async def test_calls_beyond_the_cap_are_refused(self, async_client, stub, monkeypatch):
-        monkeypatch.setattr(settings, "ai_daily_cap", 2)
+        monkeypatch.setattr(settings, "ai_daily_cap_ramp", (2, 2, 2))
         installed = stub({"status": "more", "tasks": ["Step"]})
 
         for _ in range(2):
@@ -154,7 +154,7 @@ class TestDailyCap:
         assert len(installed.calls) == 2
 
     async def test_the_cap_can_be_disabled(self, async_client, stub, monkeypatch):
-        monkeypatch.setattr(settings, "ai_daily_cap", 0)
+        monkeypatch.setattr(settings, "ai_daily_cap_ramp", (0, 0, 0))
         stub({"status": "more", "tasks": ["Step"]})
 
         for _ in range(5):
@@ -172,7 +172,7 @@ class TestDailyCap:
         assert len(dynamodb.updates) == 1
         update = dynamodb.updates[0]
         assert update["Key"]["pk"].endswith(f"#{today().isoformat()}")
-        assert dynamodb.items[update["Key"]["pk"]] == 1
+        assert dynamodb.items[update["Key"]["pk"]]["calls"] == 1
 
     async def test_the_counter_is_one_item_per_user_per_day(
         self, async_client, stub, dynamodb
@@ -183,8 +183,10 @@ class TestDailyCap:
                 "/api/goals/next-steps", json={"goal_title": "Anything"}
             )
 
-        assert len(dynamodb.items) == 1
-        assert list(dynamodb.items.values()) == [3]
+        # The account record and the counter, and nothing else.
+        assert len(dynamodb.items) == 2
+        counters = [v["calls"] for v in dynamodb.items.values() if "calls" in v]
+        assert counters == [3]
 
     async def test_the_limit_is_enforced_by_a_condition_not_a_read(
         self, async_client, stub, dynamodb

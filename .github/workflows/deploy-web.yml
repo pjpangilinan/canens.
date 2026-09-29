@@ -2,7 +2,7 @@ name: Deploy web to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
     paths: ["web/**", ".github/workflows/deploy-web.yml"]
   workflow_dispatch:
 
@@ -27,14 +27,28 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Fail if the API URL is not configured
-        # The build itself succeeds without it, because a missing value is a
-        # deployment mistake rather than a compile error. Catching it here
-        # stops a page shipping that silently points at localhost:8000.
+      - name: Fail if the build variables are not configured
+        # The build itself succeeds without them, because a missing value is a
+        # deployment mistake rather than a compile error. Catching it here stops
+        # a page shipping that points at localhost, or that has no way to sign
+        # in and therefore 401s on every call.
+        #
+        # Written out one at a time on purpose: GitHub interpolates ${{ }} before
+        # the shell runs, so a loop over variable names cannot look up vars.$name.
         run: |
-          if [ -z "${{ vars.NEXT_PUBLIC_API_URL }}" ]; then
-            echo "::error::Repository variable NEXT_PUBLIC_API_URL is not set."
-            echo "Add it under Settings > Secrets and variables > Actions."
+          missing=0
+          for pair in \
+            "NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}" \
+            "NEXT_PUBLIC_COGNITO_USER_POOL_ID=${{ vars.NEXT_PUBLIC_COGNITO_USER_POOL_ID }}" \
+            "NEXT_PUBLIC_COGNITO_CLIENT_ID=${{ vars.NEXT_PUBLIC_COGNITO_CLIENT_ID }}"
+          do
+            if [ -z "${pair#*=}" ]; then
+              echo "::error::Repository variable ${pair%%=*} is not set."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Add them under Settings > Secrets and variables > Actions."
             exit 1
           fi
 
@@ -53,7 +67,9 @@ jobs:
         working-directory: web
         env:
           NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
-          NEXT_PUBLIC_API_TOKEN: ${{ vars.NEXT_PUBLIC_API_TOKEN }}
+          NEXT_PUBLIC_COGNITO_USER_POOL_ID: ${{ vars.NEXT_PUBLIC_COGNITO_USER_POOL_ID }}
+          NEXT_PUBLIC_COGNITO_CLIENT_ID: ${{ vars.NEXT_PUBLIC_COGNITO_CLIENT_ID }}
+          NEXT_PUBLIC_AWS_REGION: ${{ vars.NEXT_PUBLIC_AWS_REGION }}
           NEXT_PUBLIC_BASE_PATH: ${{ vars.NEXT_PUBLIC_BASE_PATH }}
         run: npm run build
 

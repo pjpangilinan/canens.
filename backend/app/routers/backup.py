@@ -4,13 +4,13 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.deps import current_user_id, require_token
+from app.deps import require_user
 from app.storage import MAX_SNAPSHOT_ROWS, load_snapshot, save_snapshot
 
 router = APIRouter(
     prefix="/api/backup",
     tags=["backup"],
-    dependencies=[Depends(require_token)],
+    dependencies=[Depends(require_user)],
 )
 
 
@@ -30,7 +30,7 @@ class SnapshotOut(BaseModel):
 # FastAPI only hands a non-async endpoint to its threadpool. An `async def` here
 # would stall the event loop for the length of the S3 round trip.
 @router.get("", response_model=SnapshotOut)
-def download_backup(user_id=Depends(current_user_id)) -> SnapshotOut:
+def download_backup(user_id=Depends(require_user)) -> SnapshotOut:
     stored = load_snapshot(str(user_id))
     if stored is None:
         return SnapshotOut(exists=False)
@@ -38,7 +38,7 @@ def download_backup(user_id=Depends(current_user_id)) -> SnapshotOut:
 
 
 @router.put("", response_model=SnapshotOut)
-def upload_backup(snapshot: SnapshotIn, user_id=Depends(current_user_id)) -> SnapshotOut:
+def upload_backup(snapshot: SnapshotIn, user_id=Depends(require_user)) -> SnapshotOut:
     total = len(snapshot.goals) + len(snapshot.tasks)
     if total > MAX_SNAPSHOT_ROWS:
         raise HTTPException(

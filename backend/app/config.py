@@ -1,4 +1,3 @@
-from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,36 +7,31 @@ class Settings(BaseSettings):
     snapshot_bucket: str = "canens-snapshots"
     usage_table: str = "canens-ai-usage"
 
-    # Bedrock credentials are not read here. They come from the execution role
-    # that Lambda provides, so there is no API key to configure or leak.
+    # Cognito. The API Gateway JWT authorizer validates the token at the edge, so
+    # the function does no cryptography: it reads the verified subject out of the
+    # event. These are the identifiers the authorizer and the pool are wired to,
+    # and they only matter when running the function directly.
+    cognito_user_pool_id: str = ""
+    cognito_client_id: str = ""
     aws_region: str = "us-east-1"
-    bedrock_model_id: str = "amazon.nova-lite-v1-v1:0"
+    bedrock_model_id: str = "amazon.nova-lite-v1:0"
 
     # Per-token billing makes an unbounded generation a real cost, so every
     # call is capped explicitly.
     bedrock_max_tokens: int = 1024
     bedrock_timeout_seconds: float = 20.0
 
-    # Hard ceiling on model calls per user per day. Set to 0 to disable.
-    # The count lives in DynamoDB, not in memory, because Lambda discards
-    # execution environments and an in-process counter would reset behind your
-    # back.
-    ai_daily_cap: int = 200
+    # Sign-up is open, so every account gets its own allowance and the allowance
+    # starts small. This is the whole reason a stranger cannot cost real money
+    # on their first afternoon: a new account may make the first number of
+    # calls, and the last is the steady state for as long as the account lives.
+    # Index is the account's age in days, so this is days 0, 1, 2, 3 and 4+.
+    ai_daily_cap_ramp: tuple[int, ...] = (10, 25, 50, 100, 200)
 
-    # Comma-separated list of exact origins permitted to call the API.
+    # Comma-separated list of exact origins permitted to call the API. The
+    # Cognito hosted UI is a redirect, not a fetch, so only the frontend is
+    # listed here.
     allowed_origins: str = "http://localhost:3000"
-
-    # Shared secret required in the X-Canens-Token header on AI and backup
-    # routes. This is not real authentication: the value is inlined into the
-    # client bundle, so anyone who can load the page has it. It exists to stop
-    # casual abuse of a public endpoint, not to resist an attacker. Pair it
-    # with the daily call cap and an account-level spend limit.
-    #
-    # It is required when APP_ENV is "production" and optional otherwise, so a
-    # deployment that forgets to set it fails at startup rather than quietly
-    # serving an unauthenticated, billable endpoint to the internet.
-    api_token: str | None = None
-    app_env: str = "development"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -47,22 +41,16 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    @model_validator(mode="after")
-    def _token_required_in_production(self) -> "Settings":
-        if self.app_env.lower() == "production" and not self.api_token:
-            raise ValueError(
-                "API_TOKEN must be set when APP_ENV=production. Without it the AI "
-                "and backup routes are unauthenticated and billable."
-            )
-        return self
-
     @property
     def origin_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
+    def daily_cap_for(self, age_days: int) -> int:
+        """The allowance for an account of a given age, in days."""
+        ramp = self.ai_daily_cap_ramp
+        if not ramp:
+            return 0
+        return ramp[min(max(age_days, 0), len(ramp) - 1)]
+
 
 settings = Settings()
-
-# Single-user MVP. Real accounts are out of scope; the id stays threaded
-# through every model and query so they remain possible later.
-MVP_USER_ID = "00000000-0000-0000-0000-000000000000"

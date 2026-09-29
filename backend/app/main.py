@@ -15,7 +15,11 @@ app.add_middleware(
     allow_origins=settings.origin_list,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "OPTIONS"],
-    allow_headers=["Content-Type", "X-Canens-Token"],
+    # Authorization, not the shared token this used to send. A preflight that
+    # does not list it fails, and the request it was asking about never leaves
+    # the browser - which reads as "the server is down" rather than as a
+    # permissions problem.
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 app.include_router(ai.router)

@@ -1,17 +1,25 @@
-"""The daily model-call counter.
+"""Per-user daily model-call allowance.
 
-It is a counter rather than a row in a table because the only thing the server
-needs to remember is how many times it has called a model today, and the thing
-that makes it hard is not storage - it is that Lambda discards execution
-environments, so an in-process counter resets to zero whenever a container is
-replaced. A value that silently resets is worse than no ceiling at all, because
-it looks like it is working.
+Sign-up is open, so the server is public to strangers and every one of them can
+call a model. Two things bound that.
 
-DynamoDB gives an atomic increment with a condition, so two concurrent requests
-cannot both slip past the limit, and one item per user per day expires by TTL.
-On-demand capacity makes the whole thing a rounding error in the bill.
+The allowance is per user, and it starts small. A new account gets a handful of
+calls and ramps up over the first few days, so an account created an hour ago to
+try the app cannot cost anything meaningful, while a real person's allowance
+reaches its steady state in under a week. The ramp is in `settings`.
+
+The count lives in DynamoDB rather than in the process because Lambda discards
+execution environments: a counter in memory resets to zero whenever a container
+is replaced, which looks like a working ceiling and is not one. The increment and
+the check are a single conditional update, so the ceiling holds when two requests
+arrive together rather than being a read followed by a hopeful write.
+
+The account's age is measured from its first recorded call, not from when the
+user signed up, so it does not depend on anything Cognito reports and cannot be
+backdated by a client.
 """
 import time
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -33,6 +41,11 @@ class DailyCapReached(Exception):
 
 
 _client: Any = None
+
+#: Partition key prefix for the one record describing an account.
+_USER_PREFIX = "u#"
+#: Partition key prefix for a day's counter.
+_COUNTER_PREFIX = "c#"
 
 
 def client() -> Any:
@@ -61,17 +74,56 @@ def today() -> date:
     return datetime.now(timezone.utc).date()
 
 
-def _key(user_id: str, day: date) -> str:
-    return f"{user_id}#{day.isoformat()}"
+def _counter_key(user_id: uuid.UUID, day: date) -> str:
+    return f"{_COUNTER_PREFIX}{user_id}#{day.isoformat()}"
 
 
-def reserve_call(user_id: str, limit: int) -> int | None:
+def _user_key(user_id: uuid.UUID) -> str:
+    return f"{_USER_PREFIX}{user_id}"
+
+
+def _first_seen(user_id: uuid.UUID) -> date:
+    """When this account was first seen, recording it if it is new.
+
+    Two accounts racing to create the same record is not a problem worth a
+    transaction: both write the same value, and the loser re-reads. The loser of
+    the race is the only one that pays for the extra read.
+    """
+    table = client()
+    key = _user_key(user_id)
+
+    response = table.get_item(Key={"pk": key})
+    item = response.get("Item")
+    if item and item.get("first_seen"):
+        return date.fromisoformat(item["first_seen"])
+
+    today_iso = today().isoformat()
+    try:
+        table.put_item(
+            Item={"pk": key, "first_seen": today_iso},
+            ConditionExpression="attribute_not_exists(pk)",
+        )
+        return today()
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        # Someone else created it first; their value is the real one.
+        existing = table.get_item(Key={"pk": key}).get("Item") or {}
+        return date.fromisoformat(existing.get("first_seen", today_iso))
+
+
+def allowance(user_id: uuid.UUID) -> int:
+    """Today's cap for this account."""
+    age_days = (today() - _first_seen(user_id)).days
+    return settings.daily_cap_for(age_days)
+
+
+def reserve_call(user_id: uuid.UUID) -> int | None:
     """Claim one call for today. Returns the new count, or None if disabled.
 
-    Raises DailyCapReached once the day's allowance is spent. The increment and
-    the check are a single conditional update, so the ceiling holds under
-    concurrency rather than being a read followed by a hopeful write.
+    Raises DailyCapReached once today's allowance is spent.
     """
+    limit = allowance(user_id)
     if limit <= 0:
         return None
 
@@ -82,7 +134,7 @@ def reserve_call(user_id: str, limit: int) -> int | None:
 
     try:
         response = client().update_item(
-            Key={"pk": _key(user_id, day)},
+            Key={"pk": _counter_key(user_id, day)},
             UpdateExpression="ADD #calls :one SET #expires = :expires",
             # Fails once calls has reached the limit, so exactly `limit` calls
             # get through.
