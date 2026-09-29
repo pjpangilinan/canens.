@@ -1,7 +1,8 @@
 import uuid
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Response, status
 
+from app.config import settings
 from app.services.usage import DailyCapReached, reserve_call
 
 
@@ -30,6 +31,7 @@ async def require_user(
 
 
 def enforce_daily_ai_cap(
+    response: Response,
     user_id: uuid.UUID = Depends(require_user),
 ) -> None:
     """Reserve one model call, refusing once today's allowance is spent.
@@ -43,9 +45,16 @@ def enforce_daily_ai_cap(
     threadpool when it is a plain ``def``; as ``async def`` it would block the
     event loop for the length of the DynamoDB round trip.
     """
+    limit = settings.ai_daily_cap
     try:
-        reserve_call(user_id)
+        calls = reserve_call(user_id)
+        if calls is not None and limit > 0:
+            response.headers["X-RateLimit-Limit"] = str(limit)
+            response.headers["X-RateLimit-Remaining"] = str(max(0, limit - calls))
     except DailyCapReached as exc:
+        if limit > 0:
+            response.headers["X-RateLimit-Limit"] = str(limit)
+            response.headers["X-RateLimit-Remaining"] = "0"
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
         ) from exc

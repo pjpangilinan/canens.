@@ -56,6 +56,8 @@ async def test_next_steps_returns_proposed_tasks(async_client, stub):
 
     assert response.status_code == 200
     assert response.json() == {"status": "more", "tasks": ["Draft the outline", "Review it"]}
+    assert "x-ratelimit-limit" in response.headers
+    assert "x-ratelimit-remaining" in response.headers
 
 
 async def test_next_steps_passes_existing_tasks_through(async_client, stub):

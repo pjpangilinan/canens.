@@ -152,7 +152,7 @@ export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
           <h2 className="text-lg font-semibold text-foreground">{title}</h2>
 
           {notice && (
-            <p className="text-sm text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-4 py-2">
+            <p role="status" aria-live="polite" className="text-sm text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-4 py-2">
               {notice}
             </p>
           )}

@@ -94,8 +94,9 @@ export async function uploadBackup(): Promise<void> {
         keepalive: true,
       });
       if (!response.ok) throw new Error(`Backup failed: ${response.status}`);
+      const body = (await response.json().catch(() => null)) as { saved_at?: string } | null;
       markBackedUp();
-      await setMeta({ saved_at: new Date().toISOString(), last_error: null });
+      await setMeta({ saved_at: body?.saved_at ?? new Date().toISOString(), last_error: null });
     } catch (error) {
       // A failed backup must not lose the data; the next write or reconnect
       // schedules another attempt.

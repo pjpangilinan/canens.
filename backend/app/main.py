@@ -20,6 +20,7 @@ app.add_middleware(
     # the browser - which reads as "the server is down" rather than as a
     # permissions problem.
     allow_headers=["Content-Type", "Authorization"],
+    expose_headers=["X-RateLimit-Limit", "X-RateLimit-Remaining"],
 )
 
 app.include_router(ai.router)

@@ -34,6 +34,7 @@ export default function GoalInput({ onSubmit, onError }: GoalInputProps) {
         onChange={(e) => setTitle(e.target.value)}
         placeholder="What is your next goal?"
         aria-label="New goal"
+        maxLength={500}
         className="w-full bg-surface/50 border border-primary/20 rounded-xl py-4 pl-6 pr-24 text-foreground placeholder-muted focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all shadow-inner"
         disabled={submitting}
       />

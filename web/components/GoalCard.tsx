@@ -364,15 +364,25 @@ export default function GoalCard({
                         autoFocus
                         value={editTaskTitle}
                         onChange={(e) => setEditTaskTitle(e.target.value)}
+                        onBlur={() => {
+                          const title = editTaskTitle.trim();
+                          setEditingTaskId(null);
+                          if (title && title !== task.title) {
+                            void run(() => store.renameTask(task.id, title), "Could not rename the step");
+                          }
+                        }}
                         onKeyDown={(e) => {
                           if (e.key === "Enter" && editTaskTitle.trim()) {
                             const id = task.id;
-                            const title = editTaskTitle;
+                            const title = editTaskTitle.trim();
                             setEditingTaskId(null);
-                            void run(() => store.renameTask(id, title), "Could not rename the step");
+                            if (title !== task.title) {
+                              void run(() => store.renameTask(id, title), "Could not rename the step");
+                            }
                           }
                           if (e.key === "Escape") setEditingTaskId(null);
                         }}
+                        maxLength={200}
                         className="flex-1 bg-black/50 border border-primary/50 rounded px-2 py-1 text-sm text-foreground focus:outline-none focus:border-primary"
                         aria-label="Step title"
                       />
@@ -399,7 +409,7 @@ export default function GoalCard({
                           {task.title}
                         </span>
                       </div>
-                      <div className="flex space-x-1 opacity-0 group-hover/task:opacity-100 focus-within:opacity-100 transition-opacity shrink-0 ml-4">
+                      <div className="flex space-x-1 opacity-100 sm:opacity-0 sm:group-hover/task:opacity-100 focus-within:opacity-100 transition-opacity shrink-0 ml-4">
                         <button
                           onClick={() => {
                             setEditingTaskId(task.id);
@@ -481,8 +491,12 @@ export default function GoalCard({
                     autoFocus
                     value={newTaskTitle}
                     onChange={(e) => setNewTaskTitle(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") setAddingTask(false);
+                    }}
                     placeholder="Describe the next step..."
                     aria-label={`Add a step to "${goal.title}"`}
+                    maxLength={200}
                     className="flex-1 bg-black/50 border border-white/10 rounded px-3 py-1.5 text-sm text-foreground focus:outline-none focus:border-primary"
                   />
                   <button
