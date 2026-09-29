@@ -178,8 +178,16 @@ class TestIsolation:
     ):
         from app.services.usage import _counter_key, today
 
-        await async_client.post("/api/goals/next-steps", json={"goal_title": "A"})
-        await other_user_client.post("/api/goals/next-steps", json={"goal_title": "B"})
+        mine_call = await async_client.post(
+            "/api/goals/next-steps", json={"goal_title": "A"}
+        )
+        their_call = await other_user_client.post(
+            "/api/goals/next-steps", json={"goal_title": "B"}
+        )
+        # Asserted, not assumed. This test once ignored the response, so a 502
+        # from a real Bedrock call passed while still counting the requests.
+        assert mine_call.status_code == 200, mine_call.text
+        assert their_call.status_code == 200, their_call.text
 
         day = today()
         mine = _counter_key(uuid.UUID(VALID), day)
@@ -218,8 +226,24 @@ class TestIsolation:
         assert other.status_code == 200, "the second user has their own allowance"
 
 
+class TestNoModelCallsFromTests:
+    """CI must never call Bedrock. It costs money, and the failure is silent
+    unless something enforces it."""
+
+    async def test_the_stub_is_installed_for_every_test(self, no_bedrock, async_client):
+        assert no_bedrock is not None, (
+            "the autouse stub is not running, so this suite may be calling the "
+            "real model - check the no_bedrock fixture in conftest"
+        )
+        await async_client.post("/api/goals/next-steps", json={"goal_title": "Anything"})
+        assert no_bedrock.calls, "the route did not go through the stub"
+
+    def test_a_stub_something_requests_is_refused(self, no_bedrock):
+        """The escape hatch is narrow on purpose."""
+        assert no_bedrock is not None
+
+
 class TestAllowance:
-    """One number bounds the endpoint, because sign-up is open."""
 
     def test_it_is_twenty_five(self):
         assert settings.ai_daily_cap == 25

@@ -121,6 +121,42 @@ class FakeDynamoDB:
         return self.items.get(key, {}).get("calls", 0)
 
 
+class StubBedrock:
+    """Stands in for the model, and records what it was asked for."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def next_steps(self, goal_title, existing_tasks):
+        self.calls.append((goal_title, existing_tasks))
+        return {"status": "more", "tasks": ["Step"]}
+
+    def starter_goals(self, answers, count=4):
+        self.calls.append((answers, count))
+        return {"goals": ["A goal"]}
+
+
+@pytest.fixture(autouse=True)
+def no_bedrock(monkeypatch, request):
+    """No test may reach Bedrock, so CI cannot spend money.
+
+    Autouse, because the alternative is each test remembering. Two of these were
+    written without a stub and reached the real client: they passed on a machine
+    with AWS credentials and failed in CI on NoCredentialsError, which is the
+    whole failure mode this fixture exists to make impossible.
+
+    A test that genuinely needs the provider asks for it by requesting
+    ``real_bedrock``, and that is only honoured when CANENS_TEST=1.
+    """
+    if os.environ.get("CANENS_TEST") == "1" and "real_bedrock" in request.fixturenames:
+        yield None
+        return
+
+    stub = StubBedrock()
+    monkeypatch.setattr("app.routers.ai.bedrock", stub)
+    yield stub
+
+
 @pytest.fixture
 def s3():
     fake = FakeS3()
