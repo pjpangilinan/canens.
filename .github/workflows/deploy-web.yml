@@ -40,7 +40,8 @@ jobs:
           for pair in \
             "NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}" \
             "NEXT_PUBLIC_COGNITO_USER_POOL_ID=${{ vars.NEXT_PUBLIC_COGNITO_USER_POOL_ID }}" \
-            "NEXT_PUBLIC_COGNITO_CLIENT_ID=${{ vars.NEXT_PUBLIC_COGNITO_CLIENT_ID }}"
+            "NEXT_PUBLIC_COGNITO_CLIENT_ID=${{ vars.NEXT_PUBLIC_COGNITO_CLIENT_ID }}" \
+            "NEXT_PUBLIC_BASE_PATH=${{ vars.NEXT_PUBLIC_BASE_PATH }}"
           do
             if [ -z "${pair#*=}" ]; then
               echo "::error::Repository variable ${pair%%=*} is not set."
@@ -49,6 +50,10 @@ jobs:
           done
           if [ "$missing" -ne 0 ]; then
             echo "Add them under Settings > Secrets and variables > Actions."
+            echo "The values are published by the stack:"
+            echo "  aws cloudformation describe-stacks --stack-name canens-prod \\"
+            echo "    --query 'Stacks[0].Outputs[?OutputKey==\`FrontendVariables\`].OutputValue' --output text"
+            echo "and NEXT_PUBLIC_BASE_PATH is the repository name, slash included."
             exit 1
           fi
 
