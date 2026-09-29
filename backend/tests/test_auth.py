@@ -237,7 +237,11 @@ class TestAllowanceRamp:
     def test_a_negative_age_cannot_buy_a_bigger_allowance(self):
         assert settings.daily_cap_for(-5) == settings.ai_daily_cap_ramp[0]
 
-    def test_the_steady_state_is_bounded(self):
-        """The last rung is the number the old shared cap used, so no account
-        is worse off for being multi-tenant."""
-        assert settings.ai_daily_cap_ramp[-1] == 200
+    def test_the_steady_state_is_fifty(self):
+        """The last rung is the ceiling the owner asked for, and no account is
+        allowed above it however old it is."""
+        assert settings.ai_daily_cap_ramp[-1] == 50
+        assert settings.daily_cap_for(10_000) == 50
+
+    def test_no_day_of_the_ramp_exceeds_the_ceiling(self):
+        assert max(settings.ai_daily_cap_ramp) <= 50

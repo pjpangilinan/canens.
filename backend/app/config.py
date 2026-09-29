@@ -25,8 +25,12 @@ class Settings(BaseSettings):
     # starts small. This is the whole reason a stranger cannot cost real money
     # on their first afternoon: a new account may make the first number of
     # calls, and the last is the steady state for as long as the account lives.
-    # Index is the account's age in days, so this is days 0, 1, 2, 3 and 4+.
-    ai_daily_cap_ramp: tuple[int, ...] = (10, 25, 50, 100, 200)
+    # The ramp is in `settings`.
+    #
+    # Index is the account's age in days, so this is days 0, 1 and 2+. Fifty is a
+    # ceiling, not a target: a single user is nowhere near it, and fifty calls a
+    # day is already far more than generating a list of next steps needs.
+    ai_daily_cap_ramp: tuple[int, ...] = (10, 25, 50)
 
     # Comma-separated list of exact origins permitted to call the API. The
     # Cognito hosted UI is a redirect, not a fetch, so only the frontend is

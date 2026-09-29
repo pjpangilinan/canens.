@@ -451,3 +451,21 @@ Outputs:
   UsageTableName:
     Description: DynamoDB table holding the daily model-call counter
     Value: !Ref UsageTable
+  UserPoolId:
+    Description: NEXT_PUBLIC_COGNITO_USER_POOL_ID
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: NEXT_PUBLIC_COGNITO_CLIENT_ID
+    Value: !Ref UserPoolClient
+  # The three NEXT_PUBLIC_* values the frontend build needs, in one string, so
+  # they can be pasted into the repository's Actions variables without anyone
+  # having to read this template:
+  #   aws cloudformation describe-stacks --stack-name canens-prod \
+  #     --query 'Stacks[0].Outputs[?OutputKey==`FrontendVariables`].OutputValue'
+  FrontendVariables:
+    Description: The API URL, pool id and client id the frontend build needs
+    Value: !Sub >-
+      NEXT_PUBLIC_API_URL=https://${CanensApi}.execute-api.${AWS::Region}.amazonaws.com
+      NEXT_PUBLIC_COGNITO_USER_POOL_ID=${UserPool}
+      NEXT_PUBLIC_COGNITO_CLIENT_ID=${UserPoolClient}
+      NEXT_PUBLIC_AWS_REGION=${AWS::Region}

@@ -154,12 +154,12 @@ a model. The allowance is per account and starts small:
 | --- | --- |
 | Day 0 | 10 |
 | Day 1 | 25 |
-| Day 2 | 50 |
-| Day 3 | 100 |
-| Day 4 and after | 200 |
+| Day 2 and after | 50 |
 
-The age is measured from the account's first model call, not from sign-up, so a
-client cannot backdate it. Alongside that:
+Fifty is a ceiling, not a target. One user is nowhere near it, and generating a
+list of next steps does not take fifty calls. The age is measured from the
+account's first model call, not from sign-up, so a client cannot backdate it.
+Alongside that:
 
 - `BEDROCK_MAX_TOKENS` per call, and generation is user-initiated only.
 - The increment and the check are one conditional update, so the ceiling holds
