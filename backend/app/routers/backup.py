@@ -47,10 +47,25 @@ def upload_backup(snapshot: SnapshotIn, user_id=Depends(require_user)) -> Snapsh
         )
 
     for row in [*snapshot.goals, *snapshot.tasks]:
-        if not isinstance(row.get("id"), str) or not row.get("title"):
+        row_id = row.get("id")
+        row_title = row.get("title")
+        if (
+            not isinstance(row_id, str)
+            or not row_id
+            or len(row_id) > 128
+            or not isinstance(row_title, str)
+            or not row_title
+            or len(row_title) > 1000
+        ):
             raise HTTPException(
                 status_code=422, detail="Every row needs a string id and a title"
             )
+        for k, v in row.items():
+            if isinstance(v, str) and len(v) > 2000:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Field '{k}' exceeds maximum length of 2000 characters",
+                )
 
     saved = save_snapshot(str(user_id), snapshot.goals, snapshot.tasks)
     return SnapshotOut(exists=True, **saved)

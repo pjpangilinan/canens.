@@ -1,8 +1,11 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.deps import enforce_daily_ai_cap, require_user
 from app.services.bedrock import ProviderError, bedrock
+from app.services.usage import refund_call
 
 router = APIRouter(prefix="/api", tags=["ai"], dependencies=[Depends(require_user)])
 
@@ -42,7 +45,9 @@ class StarterGoalsRequest(BaseModel):
     response_model=NextStepsResponse,
     dependencies=[Depends(enforce_daily_ai_cap)],
 )
-def next_steps(req: NextStepsRequest) -> NextStepsResponse:
+def next_steps(
+    req: NextStepsRequest, user_id: uuid.UUID = Depends(require_user)
+) -> NextStepsResponse:
     """Propose the next actions for a goal.
 
     This endpoint takes a goal title rather than a goal id. The browser owns
@@ -56,6 +61,7 @@ def next_steps(req: NextStepsRequest) -> NextStepsResponse:
             [t.model_dump() for t in req.existing_tasks],
         )
     except ProviderError as exc:
+        refund_call(user_id)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return NextStepsResponse(status=result["status"], tasks=result["tasks"])
@@ -66,10 +72,13 @@ def next_steps(req: NextStepsRequest) -> NextStepsResponse:
     response_model=StarterGoalsResponse,
     dependencies=[Depends(enforce_daily_ai_cap)],
 )
-def starter_goals(req: StarterGoalsRequest) -> StarterGoalsResponse:
+def starter_goals(
+    req: StarterGoalsRequest, user_id: uuid.UUID = Depends(require_user)
+) -> StarterGoalsResponse:
     try:
         result = bedrock.starter_goals(req.answers, req.count)
     except ProviderError as exc:
+        refund_call(user_id)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return StarterGoalsResponse(goals=result["goals"])

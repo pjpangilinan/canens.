@@ -105,6 +105,26 @@ def reserve_call(user_id: uuid.UUID) -> int | None:
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
             raise DailyCapReached(day, limit) from exc
-        raise
-
     return int(response["Attributes"]["calls"])
+
+
+def refund_call(user_id: uuid.UUID) -> None:
+    """Refund one reserved call if the downstream model invocation failed."""
+    if settings.ai_daily_cap <= 0:
+        return
+
+    day = today()
+    try:
+        client().update_item(
+            Key={"pk": _counter_key(user_id, day)},
+            UpdateExpression="ADD #calls :minus_one",
+            ConditionExpression="attribute_exists(#calls) AND #calls > :zero",
+            ExpressionAttributeNames={"#calls": "calls"},
+            ExpressionAttributeValues={
+                ":minus_one": -1,
+                ":zero": 0,
+            },
+            ReturnValues="UPDATED_NEW",
+        )
+    except ClientError:
+        pass

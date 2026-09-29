@@ -87,9 +87,14 @@ async def test_next_steps_writes_no_domain_rows(async_client, stub, s3):
     assert s3.objects == before, "a model call must not write the snapshot"
 
 
-async def test_provider_failure_is_surfaced_not_substituted(async_client, stub):
-    """A failure must reach the user. The old code returned a fake task instead."""
+async def test_provider_failure_is_surfaced_not_substituted(async_client, stub, dynamodb):
+    """A failure must reach the user, and the reserved attempt must be refunded."""
+    from tests.conftest import TEST_USER
+    from app.services import usage
+
     stub(error=ProviderError("bedrock unavailable"))
+    key = f"c#{TEST_USER}#{usage.today().isoformat()}"
+    before_calls = dynamodb.calls_for(key)
 
     response = await async_client.post(
         "/api/goals/next-steps", json={"goal_title": "Anything"}
@@ -97,6 +102,7 @@ async def test_provider_failure_is_surfaced_not_substituted(async_client, stub):
 
     assert response.status_code == 502
     assert "unavailable" in response.json()["detail"]
+    assert dynamodb.calls_for(key) == before_calls
 
 
 async def test_done_status_is_reported_for_the_user_to_confirm(async_client, stub):

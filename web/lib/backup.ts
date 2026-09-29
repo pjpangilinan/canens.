@@ -91,6 +91,7 @@ export async function uploadBackup(): Promise<void> {
         method: "PUT",
         headers: apiHeaders(),
         body: JSON.stringify({ goals, tasks }),
+        keepalive: true,
       });
       if (!response.ok) throw new Error(`Backup failed: ${response.status}`);
       markBackedUp();

@@ -99,6 +99,17 @@ describe("the action request", () => {
     expect(body.ConfirmationCode).toBe("123456");
     expect(body.Password).toBe("Correct-Horse-9!Batt");
   });
+
+  it("calls GlobalSignOut with access token", async () => {
+    respondWith({});
+    const { globalSignOut } = await import("../lib/auth");
+    await globalSignOut("access-token-xyz");
+
+    const headers = lastRequest!.init.headers as Record<string, string>;
+    expect(headers["X-Amz-Target"]).toBe("AWSCognitoIdentityProviderService.GlobalSignOut");
+    const body = JSON.parse(String(lastRequest!.init.body));
+    expect(body.AccessToken).toBe("access-token-xyz");
+  });
 });
 
 describe("error translation", () => {

@@ -101,21 +101,38 @@ class FakeDynamoDB:
 
         self.updates.append(kwargs)
         key = kwargs["Key"]["pk"]
-        limit = kwargs["ExpressionAttributeValues"][":limit"]
+        vals = kwargs["ExpressionAttributeValues"]
         calls = self.items.get(key, {}).get("calls", 0)
-        if calls >= limit:
-            raise ClientError(
-                {
-                    "Error": {
-                        "Code": "ConditionalCheckFailedException",
-                        "Message": "The conditional request failed",
-                    }
-                },
-                "UpdateItem",
-            )
-        merged = {**self.items.get(key, {}), "calls": calls + 1}
-        self.items[key] = merged
-        return {"Attributes": {"calls": merged["calls"]}}
+        if ":limit" in vals:
+            limit = vals[":limit"]
+            if calls >= limit:
+                raise ClientError(
+                    {
+                        "Error": {
+                            "Code": "ConditionalCheckFailedException",
+                            "Message": "The conditional request failed",
+                        }
+                    },
+                    "UpdateItem",
+                )
+            merged = {**self.items.get(key, {}), "calls": calls + 1}
+            self.items[key] = merged
+            return {"Attributes": {"calls": merged["calls"]}}
+        elif ":minus_one" in vals:
+            if calls <= 0:
+                raise ClientError(
+                    {
+                        "Error": {
+                            "Code": "ConditionalCheckFailedException",
+                            "Message": "The conditional request failed",
+                        }
+                    },
+                    "UpdateItem",
+                )
+            merged = {**self.items.get(key, {}), "calls": max(0, calls - 1)}
+            self.items[key] = merged
+            return {"Attributes": {"calls": merged["calls"]}}
+        return {"Attributes": {"calls": calls}}
 
     def calls_for(self, key: str) -> int:
         return self.items.get(key, {}).get("calls", 0)

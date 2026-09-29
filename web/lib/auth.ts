@@ -222,6 +222,12 @@ export function confirmForgotPassword(
   }).then(() => undefined);
 }
 
+export function globalSignOut(accessToken: string): Promise<void> {
+  return action("GlobalSignOut", {
+    AccessToken: accessToken,
+  }).then(() => undefined);
+}
+
 export async function signIn(email: string, password: string): Promise<Session> {
   const result = await action<AuthResponse>("InitiateAuth", {
     ClientId: COGNITO_CLIENT_ID,
@@ -267,6 +273,10 @@ export function readSession(): Session | null {
 }
 
 export function forgetSession(): void {
+  const current = readSession();
+  if (current?.accessToken) {
+    void globalSignOut(current.accessToken).catch(() => undefined);
+  }
   window.sessionStorage.removeItem(SESSION_KEY);
   setAccessToken(null);
   void clearLocalData();

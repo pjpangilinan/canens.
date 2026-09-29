@@ -58,6 +58,11 @@ export default function RootLayout({
     <html lang="en">
       <head>
         {csp && <meta httpEquiv="Content-Security-Policy" content={csp} />}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `if (window.top !== window.self) { window.top.location = window.self.location; }`,
+          }}
+        />
       </head>
       <body
         className={`${inter.variable} bg-background text-foreground min-h-screen flex flex-col font-body antialiased`}
