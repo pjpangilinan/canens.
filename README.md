@@ -28,8 +28,7 @@ application. Sign-up is open.
 
 ![Signed out](screenshots/01-signed-out.png)
 
-**Your own store.** A new account starts empty, with the model-call allowance
-ramping up from a handful a day.
+**Your own store.** A new account starts empty.
 
 ![Signed in](screenshots/02-signed-in.png)
 
@@ -148,17 +147,11 @@ none of it is obvious from the template.
 ### Keeping the bill bounded
 
 Sign-up is open, so the endpoint is public to strangers and each of them can call
-a model. The allowance is per account and starts small:
+a model. One number bounds that: **25 calls per account per day**. A ramp used
+to soften new accounts, and it was removed rather than retuned, because at this
+number the ramp chose between 10 and 25 and paid for a second database item and
+two extra round-trips on every model call to do it.
 
-| Account age | Calls per day |
-| --- | --- |
-| Day 0 | 10 |
-| Day 1 | 25 |
-| Day 2 and after | 50 |
-
-Fifty is a ceiling, not a target. One user is nowhere near it, and generating a
-list of next steps does not take fifty calls. The age is measured from the
-account's first model call, not from sign-up, so a client cannot backdate it.
 Alongside that:
 
 - `BEDROCK_MAX_TOKENS` per call, and generation is user-initiated only.

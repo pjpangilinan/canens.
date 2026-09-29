@@ -8,7 +8,7 @@ A single self-contained CloudFormation stack, `canens-prod`, built with SAM.
 | Lambda (container image) | The FastAPI app, built from `backend/Dockerfile` | pennies |
 | API Gateway HTTP API | The routes, with a JWT authorizer | pennies |
 | S3 bucket | The whole-store snapshot, one object per user | ~$0 |
-| DynamoDB table | The call counter and account record, one per user per day | ~$0 |
+| DynamoDB table | The call counter, one item per user per day | ~$0 |
 | IAM role | `bedrock:InvokeModel`, one S3 prefix, one table, logs | free |
 | Budget + alarm | Ceiling and a notification at 80% of it | free |
 
@@ -42,10 +42,12 @@ Cognito rejects the pair as an invalid range otherwise.
 ## Keeping the cost bounded
 
 Sign-up is open, so the endpoint is public to strangers. The allowance is per
-account and starts at 10 calls, ramping to 200 by the fifth day. Age is measured
-from the account's first model call rather than from sign-up, so a client cannot
-backdate it. The rest is the per-call token bound, API Gateway throttling at
-5/second, and the budget alarm.
+account and flat: **25 calls a day**. The rest is the per-call token bound, API
+Gateway throttling at 5/second, and the budget alarm.
+
+A ramp used to soften new accounts, and it was removed rather than retuned. At
+this number it chose between 10 and 25, and paid for that with a second item per
+account and two extra DynamoDB round-trips on every model request.
 
 ## Why there is no database and no VPC
 
@@ -131,7 +133,7 @@ flows. Only SDK sign-in works, the hosted UI is unreachable, and nothing says so
 - **Custom domain and certificate.** The API Gateway default domain is enough;
   GitHub Pages supplies TLS for the frontend.
 - **WAF.** The cost of a public, sign-up-open endpoint is met with per-account
-  ramped caps, throttling and a budget alarm rather than with rules that would
+  the per-account cap, throttling and a budget alarm rather than with rules that would
   have to understand the traffic to be useful.
 - **MFA.** Not enabled, because the pool is for a personal tracker and Cognito's
   hosted UI is where it would be configured. `MfaConfiguration: "OFF"` is

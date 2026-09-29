@@ -58,9 +58,14 @@ class FakeS3:
 
 
 class FakeDynamoDB:
-    """A conditional counter plus the account record, and the parameters seen.
+    """A conditional counter, and the parameters seen.
 
-    Two things here are deliberate and were both learned the hard way:
+    Only UpdateItem exists on purpose. The fake covers exactly the operations the
+    application is allowed to make, so an extra call - and therefore a missing
+    IAM grant - fails the suite here instead of failing in Lambda with an opaque
+    ClientError, which is how the GetItem/PutItem omission presented last time.
+
+    Two things are deliberate, both learned the hard way:
 
     * The condition is the whole point of the design - it is what stops two
       concurrent requests from both getting past the limit - so it is
@@ -75,24 +80,13 @@ class FakeDynamoDB:
         self.items: dict[str, dict] = {}
         self.updates: list[dict] = []
 
-    def get_item(self, Key, **kwargs):  # noqa: N803
-        item = self.items.get(Key["pk"])
-        return {"Item": dict(item)} if item else {}
-
-    def put_item(self, Item, ConditionExpression=None, **kwargs):  # noqa: N803
-        key = Item["pk"]
-        if ConditionExpression and key in self.items:
-            raise ClientError(
-                {
-                    "Error": {
-                        "Code": "ConditionalCheckFailedException",
-                        "Message": "The conditional request failed",
-                    }
-                },
-                "PutItem",
+    def __getattr__(self, name: str):
+        if name in ("get_item", "put_item", "delete_item", "query", "scan"):
+            raise AssertionError(
+                f"the application called {name}, which is not in the function's "
+                f"IAM policy - add it to the template or do not make the call"
             )
-        self.items[key] = dict(Item)
-        return {}
+        raise AttributeError(name)
 
     def update_item(self, **kwargs):
         for name, value in kwargs["ExpressionAttributeValues"].items():

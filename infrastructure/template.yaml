@@ -391,15 +391,14 @@ Resources:
                   "s3:prefix": "snapshots/*"
             - Sid: UsageCounter
               Effect: Allow
+              # UpdateItem only. The increment and the cap are the same
+              # conditional request, so there is no read and no separate write -
+              # and nothing else the function might reach for by accident. A
+              # missing grant here fails as an opaque ClientError on the first
+              # model call, which is how the GetItem/PutItem pair for a since
+              # deleted ramp went unnoticed until it was deployed.
               Action:
-                # UpdateItem is the conditional increment. GetItem and PutItem
-                # are the account record that dates the user's first call, which
-                # is what the daily allowance is ramped against. Leaving either
-                # off fails only on a request that reaches the model, with an
-                # opaque ClientError.
                 - dynamodb:UpdateItem
-                - dynamodb:GetItem
-                - dynamodb:PutItem
               Resource: !GetAtt UsageTable.Arn
 
   # ------------------------------------------------------- cost and alarms

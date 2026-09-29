@@ -21,16 +21,18 @@ class Settings(BaseSettings):
     bedrock_max_tokens: int = 1024
     bedrock_timeout_seconds: float = 20.0
 
-    # Sign-up is open, so every account gets its own allowance and the allowance
-    # starts small. This is the whole reason a stranger cannot cost real money
-    # on their first afternoon: a new account may make the first number of
-    # calls, and the last is the steady state for as long as the account lives.
-    # The ramp is in `settings`.
+    # Hard ceiling on model calls per user per day. Set to 0 to disable.
     #
-    # Index is the account's age in days, so this is days 0, 1 and 2+. Fifty is a
-    # ceiling, not a target: a single user is nowhere near it, and fifty calls a
-    # day is already far more than generating a list of next steps needs.
-    ai_daily_cap_ramp: tuple[int, ...] = (10, 25, 50)
+    # Flat, not ramped. A ramp existed to soften open sign-up, but at 25 it made
+    # almost no difference, and the account record it needed - to date the ramp -
+    # was a second item per user and two extra DynamoDB calls on every model
+    # request, existing only to decide between 10 and 25. One number is the
+    # whole policy.
+    #
+    # The count lives in DynamoDB, not in memory, because Lambda discards
+    # execution environments and an in-process counter would reset behind your
+    # back.
+    ai_daily_cap: int = 25
 
     # Comma-separated list of exact origins permitted to call the API. The
     # Cognito hosted UI is a redirect, not a fetch, so only the frontend is
@@ -48,13 +50,6 @@ class Settings(BaseSettings):
     @property
     def origin_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
-
-    def daily_cap_for(self, age_days: int) -> int:
-        """The allowance for an account of a given age, in days."""
-        ramp = self.ai_daily_cap_ramp
-        if not ramp:
-            return 0
-        return ramp[min(max(age_days, 0), len(ramp) - 1)]
 
 
 settings = Settings()

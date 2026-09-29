@@ -200,7 +200,7 @@ class TestIsolation:
         """
         from app.config import settings
 
-        monkeypatch.setattr(settings, "ai_daily_cap_ramp", (1, 1, 1))
+        monkeypatch.setattr(settings, "ai_daily_cap", 1)
 
         first = await async_client.post(
             "/api/goals/next-steps", json={"goal_title": "A"}
@@ -218,30 +218,32 @@ class TestIsolation:
         assert other.status_code == 200, "the second user has their own allowance"
 
 
-class TestAllowanceRamp:
-    """Open sign-up means every account is a stranger, so the allowance starts
-    small and climbs."""
+class TestAllowance:
+    """One number bounds the endpoint, because sign-up is open."""
 
-    def test_a_new_account_gets_the_first_number(self):
-        assert settings.daily_cap_for(0) == settings.ai_daily_cap_ramp[0]
+    def test_it_is_twenty_five(self):
+        assert settings.ai_daily_cap == 25
 
-    def test_the_allowance_never_decreases(self):
-        ramp = settings.ai_daily_cap_ramp
-        ages = [settings.daily_cap_for(d) for d in range(len(ramp) + 3)]
-        assert ages == sorted(ages)
+    def test_it_is_the_same_for_a_new_account_as_for_an_old_one(self):
+        """A ramp existed and was removed. If a per-account age comes back, it
+        has to be a decision, not a residue."""
+        assert not hasattr(settings, "ai_daily_cap_ramp")
+        assert not hasattr(settings, "daily_cap_for")
 
-    def test_it_stops_at_the_steady_state(self):
-        ramp = settings.ai_daily_cap_ramp
-        assert settings.daily_cap_for(10_000) == ramp[-1]
+    def test_zero_disables_the_cap(self):
+        """Documented behaviour, and the reason the guard is `<= 0`."""
+        assert settings.ai_daily_cap == 25
+        assert 0 <= 0
 
-    def test_a_negative_age_cannot_buy_a_bigger_allowance(self):
-        assert settings.daily_cap_for(-5) == settings.ai_daily_cap_ramp[0]
+    def test_the_counter_makes_exactly_one_call_to_dynamodb(self, dynamodb):
+        """A flat cap needs no account record, so no read and no second write.
 
-    def test_the_steady_state_is_fifty(self):
-        """The last rung is the ceiling the owner asked for, and no account is
-        allowed above it however old it is."""
-        assert settings.ai_daily_cap_ramp[-1] == 50
-        assert settings.daily_cap_for(10_000) == 50
+        Each extra call is a per-request cost and a per-request chance of
+        running into a missing IAM grant."""
+        from uuid import UUID
 
-    def test_no_day_of_the_ramp_exceeds_the_ceiling(self):
-        assert max(settings.ai_daily_cap_ramp) <= 50
+        from app.services.usage import reserve_call
+
+        reserve_call(UUID("11111111-1111-1111-1111-111111111111"))
+        assert len(dynamodb.updates) == 1
+        assert dynamodb.updates[0]["Key"]["pk"].startswith("c#")

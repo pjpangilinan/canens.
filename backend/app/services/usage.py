@@ -1,12 +1,7 @@
 """Per-user daily model-call allowance.
 
 Sign-up is open, so the server is public to strangers and every one of them can
-call a model. Two things bound that.
-
-The allowance is per user, and it starts small. A new account gets a handful of
-calls and ramps up over the first few days, so an account created an hour ago to
-try the app cannot cost anything meaningful, while a real person's allowance
-reaches its steady state in under a week. The ramp is in `settings`.
+call a model. One number bounds that: `AI_DAILY_CAP` calls per account per day.
 
 The count lives in DynamoDB rather than in the process because Lambda discards
 execution environments: a counter in memory resets to zero whenever a container
@@ -14,9 +9,10 @@ is replaced, which looks like a working ceiling and is not one. The increment an
 the check are a single conditional update, so the ceiling holds when two requests
 arrive together rather than being a read followed by a hopeful write.
 
-The account's age is measured from its first recorded call, not from when the
-user signed up, so it does not depend on anything Cognito reports and cannot be
-backdated by a client.
+One item per account per day, removed by TTL. There is no second item and no
+extra read: an earlier version dated the account so the allowance could ramp, and
+once the cap was a flat number the whole of that existed to choose between 10
+and 25.
 """
 import time
 import uuid
@@ -42,9 +38,8 @@ class DailyCapReached(Exception):
 
 _client: Any = None
 
-#: Partition key prefix for the one record describing an account.
-_USER_PREFIX = "u#"
-#: Partition key prefix for a day's counter.
+#: Partition key prefix for a day's counter. Namespaced so the table can hold
+#: other kinds of item later without a migration.
 _COUNTER_PREFIX = "c#"
 
 
@@ -78,52 +73,12 @@ def _counter_key(user_id: uuid.UUID, day: date) -> str:
     return f"{_COUNTER_PREFIX}{user_id}#{day.isoformat()}"
 
 
-def _user_key(user_id: uuid.UUID) -> str:
-    return f"{_USER_PREFIX}{user_id}"
-
-
-def _first_seen(user_id: uuid.UUID) -> date:
-    """When this account was first seen, recording it if it is new.
-
-    Two accounts racing to create the same record is not a problem worth a
-    transaction: both write the same value, and the loser re-reads. The loser of
-    the race is the only one that pays for the extra read.
-    """
-    table = client()
-    key = _user_key(user_id)
-
-    response = table.get_item(Key={"pk": key})
-    item = response.get("Item")
-    if item and item.get("first_seen"):
-        return date.fromisoformat(item["first_seen"])
-
-    today_iso = today().isoformat()
-    try:
-        table.put_item(
-            Item={"pk": key, "first_seen": today_iso},
-            ConditionExpression="attribute_not_exists(pk)",
-        )
-        return today()
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
-            raise
-        # Someone else created it first; their value is the real one.
-        existing = table.get_item(Key={"pk": key}).get("Item") or {}
-        return date.fromisoformat(existing.get("first_seen", today_iso))
-
-
-def allowance(user_id: uuid.UUID) -> int:
-    """Today's cap for this account."""
-    age_days = (today() - _first_seen(user_id)).days
-    return settings.daily_cap_for(age_days)
-
-
 def reserve_call(user_id: uuid.UUID) -> int | None:
     """Claim one call for today. Returns the new count, or None if disabled.
 
     Raises DailyCapReached once today's allowance is spent.
     """
-    limit = allowance(user_id)
+    limit = settings.ai_daily_cap
     if limit <= 0:
         return None
 
