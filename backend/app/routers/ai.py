@@ -35,12 +35,14 @@ class StarterGoalsRequest(BaseModel):
     count: int = Field(default=4, ge=1, le=8)
 
 
+# Plain `def`, not `async def`. bedrock calls block on boto3, and FastAPI runs
+# plain `def` endpoints in its threadpool so the asyncio event loop is not stalled.
 @router.post(
     "/goals/next-steps",
     response_model=NextStepsResponse,
     dependencies=[Depends(enforce_daily_ai_cap)],
 )
-async def next_steps(req: NextStepsRequest) -> NextStepsResponse:
+def next_steps(req: NextStepsRequest) -> NextStepsResponse:
     """Propose the next actions for a goal.
 
     This endpoint takes a goal title rather than a goal id. The browser owns
@@ -64,7 +66,7 @@ async def next_steps(req: NextStepsRequest) -> NextStepsResponse:
     response_model=StarterGoalsResponse,
     dependencies=[Depends(enforce_daily_ai_cap)],
 )
-async def starter_goals(req: StarterGoalsRequest) -> StarterGoalsResponse:
+def starter_goals(req: StarterGoalsRequest) -> StarterGoalsResponse:
     try:
         result = bedrock.starter_goals(req.answers, req.count)
     except ProviderError as exc:

@@ -4,6 +4,9 @@ import { useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, GoalStatus, TaskStatus } from "../../lib/db";
 import SearchBar from "../../components/SearchBar";
+import SignIn from "../../components/SignIn";
+import { useAuth } from "../../lib/auth";
+import { isApiConfigured } from "../../lib/config";
 import { scheduleBackup } from "../../lib/backup";
 import { reopenGoal, timestampOf } from "../../lib/store";
 
@@ -23,6 +26,7 @@ interface DayGroup {
  * their completed steps for that reason.
  */
 export default function ActivityLog() {
+  const { status, session, signOut, recheck } = useAuth();
   const [query, setQuery] = useState("");
 
   const data = useLiveQuery(async () => {
@@ -92,13 +96,48 @@ export default function ActivityLog() {
     0,
   );
 
+  if (status === "loading") {
+    return (
+      <main className="flex-1 flex items-center justify-center">
+        <p className="text-muted text-sm">Checking your session...</p>
+      </main>
+    );
+  }
+
+  if (status === "unconfigured" && isApiConfigured) {
+    return (
+      <main className="flex-1 flex items-center justify-center px-4">
+        <div className="max-w-md text-center space-y-3">
+          <h1 className="text-2xl font-bold text-foreground">Sign-in is not configured</h1>
+          <p className="text-sm text-muted">
+            NEXT_PUBLIC_COGNITO_USER_POOL_ID and NEXT_PUBLIC_COGNITO_CLIENT_ID are unset.
+          </p>
+        </div>
+      </main>
+    );
+  }
+
+  if (status === "signed-out") {
+    return <SignIn onSignedIn={recheck} />;
+  }
+
   return (
     <main className="py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-2xl mx-auto space-y-8">
         <header className="space-y-3">
-          <h1 className="text-3xl font-extrabold text-foreground tracking-tight">
-            Activity Log
-          </h1>
+          <div className="flex items-center justify-between">
+            <h1 className="text-3xl font-extrabold text-foreground tracking-tight">
+              Activity Log
+            </h1>
+            {session?.email && (
+              <div className="flex items-center gap-3 text-xs text-muted/70">
+                <span className="truncate max-w-[14rem]">{session.email}</span>
+                <button onClick={signOut} className="underline hover:text-foreground shrink-0">
+                  Sign out
+                </button>
+              </div>
+            )}
+          </div>
           <p className="text-muted">Everything you have finished, and what it was for.</p>
         </header>
 

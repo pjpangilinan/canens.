@@ -127,6 +127,16 @@ class TestHandlerOverwritesIdentity:
 
         assert USER_HEADER not in seen, seen
 
+    def test_a_forged_header_with_mixed_casing_is_dropped(self, monkeypatch):
+        from app import lambda_handler
+
+        seen = self._capture(monkeypatch)
+        lambda_handler.handler({"headers": {"X-Canens-User": OTHER, "X-CANENS-USER": OTHER}}, None)
+
+        assert USER_HEADER not in seen, seen
+        assert "X-Canens-User" not in seen, seen
+        assert "X-CANENS-USER" not in seen, seen
+
 
 class TestRoutes:
     pytestmark = pytest.mark.asyncio

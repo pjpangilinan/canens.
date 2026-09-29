@@ -27,6 +27,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { COGNITO_CLIENT_ID, COGNITO_REGION, cognitoConfigured } from "./config";
+import { clearLocalData } from "./db";
 import { setAccessToken } from "./session";
 
 const ENDPOINT = `https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`;
@@ -118,6 +119,8 @@ function messageFor(code: string, fallback?: string): string {
       return "That code has expired. Ask for another.";
     case "InvalidPasswordException":
       return "Use at least 12 characters, with an upper case letter, a lower case letter, a number and a symbol.";
+    case "InvalidParameterException":
+      return "Cannot process request. Make sure the email is registered and verified.";
     case "LimitExceededException":
       return "Too many attempts. Wait a minute and try again.";
     case "NotAuthorizedException2":
@@ -199,6 +202,26 @@ export function confirmAccount(email: string, code: string): Promise<void> {
   }).then(() => undefined);
 }
 
+export function forgotPassword(email: string): Promise<void> {
+  return action("ForgotPassword", {
+    ClientId: COGNITO_CLIENT_ID,
+    Username: email,
+  }).then(() => undefined);
+}
+
+export function confirmForgotPassword(
+  email: string,
+  code: string,
+  newPassword: string,
+): Promise<void> {
+  return action("ConfirmForgotPassword", {
+    ClientId: COGNITO_CLIENT_ID,
+    Username: email,
+    ConfirmationCode: code,
+    Password: newPassword,
+  }).then(() => undefined);
+}
+
 export async function signIn(email: string, password: string): Promise<Session> {
   const result = await action<AuthResponse>("InitiateAuth", {
     ClientId: COGNITO_CLIENT_ID,
@@ -246,6 +269,7 @@ export function readSession(): Session | null {
 export function forgetSession(): void {
   window.sessionStorage.removeItem(SESSION_KEY);
   setAccessToken(null);
+  void clearLocalData();
 }
 
 /** A token that will still be valid in a minute, refreshing if it is not. */

@@ -176,8 +176,8 @@ function distinctiveWord(text: string): string {
 }
 
 test("a new user's first run", async ({ page, request }) => {
-  // Real model calls and a full hosted-UI redirect take a while, and the
-  // default 30s budget is for tests that stub everything.
+  // Real model calls take a while, and the default 30s budget is for tests that
+  // stub everything.
   test.setTimeout(900_000);
 
   // Tall enough that a goal card with six steps fits without scrolling, now
@@ -188,8 +188,10 @@ test("a new user's first run", async ({ page, request }) => {
   // before the session is seeded, so the gate is genuinely exercised.
   await page.goto("/");
   await expect(
-    page.getByRole("button", { name: /Sign in or create an account/ }),
+    page.getByRole("heading", { name: "Sign in" }),
+    "the signed-out screen is not the sign-in form",
   ).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByLabel("Email")).toBeVisible();
   await capture(page, "signed-out");
 
   await signIn(page);

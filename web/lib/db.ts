@@ -101,3 +101,22 @@ db.version(4)
  * that uploaded it.
  */
 export const USER_ID = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * Wipe all tables and the sync record from this browser.
+ *
+ * Called on sign-out so a shared machine or subsequent login never sees a
+ * previous user's goals or overwrites another account's backup.
+ */
+export async function clearLocalData(): Promise<void> {
+  await db.transaction("rw", db.goals, db.tasks, db.backup_meta, async () => {
+    await db.goals.clear();
+    await db.tasks.clear();
+    await db.backup_meta.clear();
+  });
+  try {
+    localStorage.removeItem("canens.has-backed-up");
+  } catch {
+    // localStorage not accessible
+  }
+}

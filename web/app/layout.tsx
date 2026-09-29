@@ -10,6 +10,45 @@ export const metadata: Metadata = {
   description: "Break a goal into the next few actions.",
 };
 
+/**
+ * A Content-Security-Policy, built from the values this build actually runs on.
+ *
+ * The access token lives in sessionStorage, so the one thing worth blocking is
+ * a script exfiltrating it: `connect-src` names the API and the Cognito endpoint
+ * and nothing else, so a token can leave for those two hosts and no others.
+ * `frame-ancestors 'none'` takes the site out of any frame, which is clickjacking
+ * on a form that spends money.
+ *
+ * `'unsafe-inline'` in script-src is not negotiable for a Next.js static
+ * export - the hydration payload is an inline script - so this is not a policy
+ * that would stop inline XSS. There are no HTML sinks in the app for it to stop.
+ * What it does buy is the exfiltration and framing backstop, which is the part
+ * that a future dependency cannot quietly take away.
+ *
+ * Null when the API is unset, which is local development: there is no origin to
+ * name and the dev server needs 'unsafe-eval', so a policy here would only
+ * produce confusing failures against a stack that is not the deployed one.
+ */
+function contentSecurityPolicy(): string | null {
+  const api = process.env.NEXT_PUBLIC_API_URL;
+  if (!api) return null;
+  const region = process.env.NEXT_PUBLIC_AWS_REGION ?? "us-east-1";
+  return [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self'",
+    `connect-src 'self' ${new URL(api).origin} https://cognito-idp.${region}.amazonaws.com`,
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join("; ");
+}
+
+const csp = contentSecurityPolicy();
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -17,6 +56,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        {csp && <meta httpEquiv="Content-Security-Policy" content={csp} />}
+      </head>
       <body
         className={`${inter.variable} bg-background text-foreground min-h-screen flex flex-col font-body antialiased`}
       >
@@ -41,7 +83,7 @@ export default function RootLayout({
             </div>
           </div>
         </nav>
-        <div className="flex-1">{children}</div>
+        <div className="flex-1 flex flex-col">{children}</div>
       </body>
     </html>
   );

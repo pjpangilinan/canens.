@@ -47,9 +47,13 @@ def _verified_subject(event: dict) -> str | None:
 
 
 def handler(event: dict, context: object) -> dict:
-    headers = dict(event.get("headers") or {})
     # Drop whatever arrived under this name before setting it from the claims.
-    headers.pop(USER_HEADER, None)
+    # Case-insensitive because HTTP headers may arrive with arbitrary casing.
+    headers = {
+        k: v
+        for k, v in (event.get("headers") or {}).items()
+        if k.lower() != USER_HEADER.lower()
+    }
     subject = _verified_subject(event)
     if subject is not None:
         headers[USER_HEADER] = subject

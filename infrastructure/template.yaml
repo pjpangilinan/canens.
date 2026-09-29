@@ -330,6 +330,20 @@ Resources:
 
   # --------------------------------------------------------------- function
 
+  # The function's own log group, declared so that it expires.
+  #
+  # Left implicit, Lambda creates /aws/lambda/<name> and it never does, which
+  # is two problems at once: unbounded cost, and unbounded retention of request
+  # data that nobody ever looks at. The name cannot be /aws/lambda/${CanensFunction}
+  # because the function's name carries a CloudFormation-generated suffix, and
+  # referencing the function from here while it references the group back is a
+  # cycle. A stable name of its own is the way out.
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-app'
+      RetentionInDays: 14
+
   CanensFunction:
     Type: AWS::Serverless::Function
     Metadata:
@@ -338,6 +352,8 @@ Resources:
     Properties:
       PackageType: Image
       Description: Canens API - AI proxy and snapshot backup
+      LoggingConfig:
+        LogGroup: !Ref FunctionLogGroup
       # No VpcConfig, deliberately. Nothing here is inside a VPC, so the
       # function has a public IP and reaches S3, DynamoDB and Bedrock directly.
       #

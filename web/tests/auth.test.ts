@@ -17,6 +17,8 @@ import {
   passwordProblem,
   readSession,
   signIn,
+  forgotPassword,
+  confirmForgotPassword,
   AuthError,
 } from "../lib/auth";
 
@@ -74,6 +76,28 @@ describe("the action request", () => {
 
     expect(lastRequest!.url).toMatch(/^https:\/\/cognito-idp\.[\w-]+\.amazonaws\.com\/$/);
     expect(lastRequest!.url).not.toContain("oauth2");
+  });
+
+  it("calls ForgotPassword with client id and username", async () => {
+    respondWith({ CodeDeliveryDetails: { Destination: "s***@e***.com" } });
+    await forgotPassword("someone@example.com");
+
+    const headers = lastRequest!.init.headers as Record<string, string>;
+    expect(headers["X-Amz-Target"]).toBe("AWSCognitoIdentityProviderService.ForgotPassword");
+    const body = JSON.parse(String(lastRequest!.init.body));
+    expect(body.Username).toBe("someone@example.com");
+  });
+
+  it("calls ConfirmForgotPassword with code and new password", async () => {
+    respondWith({});
+    await confirmForgotPassword("someone@example.com", "123456", "Correct-Horse-9!Batt");
+
+    const headers = lastRequest!.init.headers as Record<string, string>;
+    expect(headers["X-Amz-Target"]).toBe("AWSCognitoIdentityProviderService.ConfirmForgotPassword");
+    const body = JSON.parse(String(lastRequest!.init.body));
+    expect(body.Username).toBe("someone@example.com");
+    expect(body.ConfirmationCode).toBe("123456");
+    expect(body.Password).toBe("Correct-Horse-9!Batt");
   });
 });
 

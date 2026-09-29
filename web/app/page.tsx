@@ -27,7 +27,7 @@ export default function Page() {
 
   if (status === "loading") {
     return (
-      <main className="min-h-screen flex items-center justify-center">
+      <main className="flex-1 flex items-center justify-center">
         <p className="text-muted text-sm">Checking your session...</p>
       </main>
     );
@@ -35,7 +35,7 @@ export default function Page() {
 
   if (status === "unconfigured" && isApiConfigured) {
     return (
-      <main className="min-h-screen flex items-center justify-center px-4">
+      <main className="flex-1 flex items-center justify-center px-4">
         <div className="max-w-md text-center space-y-3">
           <h1 className="text-2xl font-bold text-foreground">Sign-in is not configured</h1>
           <p className="text-sm text-muted">

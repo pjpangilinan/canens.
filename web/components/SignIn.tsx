@@ -23,9 +23,11 @@ import {
   AuthError,
   passwordProblem,
   signIn as signInFor,
+  forgotPassword,
+  confirmForgotPassword,
 } from "../lib/auth";
 
-type Mode = "signin" | "signup" | "confirm";
+type Mode = "signin" | "signup" | "confirm" | "forgot" | "reset";
 
 const FIELD =
   "w-full bg-background border border-primary/20 rounded-lg px-3 py-2.5 text-foreground " +
@@ -40,7 +42,7 @@ export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const passwordHint = mode === "signup" ? passwordProblem(password) : null;
+  const passwordHint = mode === "signup" || mode === "reset" ? passwordProblem(password) : null;
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -50,10 +52,13 @@ export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
 
     const badEmail = emailProblem(email);
     if (badEmail) return setError(badEmail);
-    if (mode !== "confirm") {
-      const badPassword = mode === "signup" ? passwordProblem(password) : null;
+
+    if (mode === "signup" || mode === "reset") {
+      const badPassword = passwordProblem(password);
       if (badPassword) return setError(badPassword);
-    } else if (!code.trim()) {
+    }
+
+    if ((mode === "confirm" || mode === "reset") && !code.trim()) {
       return setError("Enter the code from the email.");
     }
 
@@ -70,12 +75,25 @@ export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
         setMode("confirm");
         return;
       }
-      await confirmAccount(email, code.trim());
-      await signInFor(email, password);
-      onSignedIn();
+      if (mode === "confirm") {
+        await confirmAccount(email, code.trim());
+        await signInFor(email, password);
+        onSignedIn();
+        return;
+      }
+      if (mode === "forgot") {
+        await forgotPassword(email);
+        setNotice(`We sent a verification code to ${email}. Enter it below with your new password.`);
+        setMode("reset");
+        return;
+      }
+      if (mode === "reset") {
+        await confirmForgotPassword(email, code.trim(), password);
+        await signInFor(email, password);
+        onSignedIn();
+        return;
+      }
     } catch (caught) {
-      // A confirmed account that the pool still reports as unconfirmed is the
-      // one failure worth acting on rather than just reporting.
       if (caught instanceof AuthError && caught.code === "UserNotConfirmedException") {
         setNotice(`We sent a code to ${email}. Enter it below to finish.`);
         setMode("confirm");
@@ -93,14 +111,35 @@ export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
     setError(null);
     setNotice(null);
     setCode("");
+    if (next === "forgot" || next === "signin") {
+      setPassword("");
+    }
   }
 
-  const title = mode === "signin" ? "Sign in" : mode === "signup" ? "Create an account" : "Confirm your email";
+  const title =
+    mode === "signin"
+      ? "Sign in"
+      : mode === "signup"
+        ? "Create an account"
+        : mode === "confirm"
+          ? "Confirm your email"
+          : mode === "forgot"
+            ? "Reset your password"
+            : "Set new password";
+
   const cta =
-    mode === "signin" ? "Sign in" : mode === "signup" ? "Create account" : "Confirm and sign in";
+    mode === "signin"
+      ? "Sign in"
+      : mode === "signup"
+        ? "Create account"
+        : mode === "confirm"
+          ? "Confirm and sign in"
+          : mode === "forgot"
+            ? "Send reset code"
+            : "Update password and sign in";
 
   return (
-    <main className="min-h-screen flex items-center justify-center px-4 py-16">
+    <main className="flex-1 flex items-center justify-center px-4 py-8">
       <div className="max-w-md w-full space-y-8">
         <header className="space-y-3 text-center">
           <h1 className="text-4xl md:text-5xl font-extrabold text-foreground tracking-tight">
@@ -123,43 +162,28 @@ export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
             </p>
           )}
 
-          {mode !== "confirm" && (
-            <>
-              <label className="block space-y-1.5">
-                <span className="text-xs text-muted">Email</span>
-                <input
-                  type="email"
-                  autoComplete="email"
-                  required
-                  autoFocus
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  className={FIELD}
-                />
-              </label>
-
-              <label className="block space-y-1.5">
-                <span className="text-xs text-muted">Password</span>
-                <input
-                  type="password"
-                  autoComplete={mode === "signup" ? "new-password" : "current-password"}
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••••••"
-                  className={FIELD}
-                />
-              </label>
-
-              {passwordHint && <p className="text-xs text-muted">{passwordHint}</p>}
-            </>
+          {mode !== "confirm" && mode !== "reset" && (
+            <div className="space-y-1.5">
+              <label htmlFor="signin-email" className="text-xs text-muted">Email</label>
+              <input
+                id="signin-email"
+                type="email"
+                autoComplete="email"
+                required
+                autoFocus
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                className={FIELD}
+              />
+            </div>
           )}
 
-          {mode === "confirm" && (
-            <label className="block space-y-1.5">
-              <span className="text-xs text-muted">Confirmation code</span>
+          {(mode === "confirm" || mode === "reset") && (
+            <div className="space-y-1.5">
+              <label htmlFor="signin-code" className="text-xs text-muted">Confirmation code</label>
               <input
+                id="signin-code"
                 inputMode="numeric"
                 autoComplete="one-time-code"
                 required
@@ -169,7 +193,40 @@ export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
                 placeholder="123456"
                 className={FIELD}
               />
-            </label>
+            </div>
+          )}
+
+          {(mode === "signin" || mode === "signup" || mode === "reset") && (
+            <>
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center">
+                  <label htmlFor="signin-password" className="text-xs text-muted">
+                    {mode === "reset" ? "New password" : "Password"}
+                  </label>
+                  {mode === "signin" && (
+                    <button
+                      type="button"
+                      onClick={() => switchTo("forgot")}
+                      className="text-xs text-muted hover:text-primary transition-colors"
+                    >
+                      Forgot password?
+                    </button>
+                  )}
+                </div>
+                <input
+                  id="signin-password"
+                  type="password"
+                  autoComplete={mode === "signin" ? "current-password" : "new-password"}
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••••••"
+                  className={FIELD}
+                />
+              </div>
+
+              {passwordHint && <p className="text-xs text-muted">{passwordHint}</p>}
+            </>
           )}
 
           <button
@@ -188,13 +245,17 @@ export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
                   Create one
                 </button>
               </>
-            ) : (
+            ) : mode === "signup" ? (
               <>
                 <span className="text-muted">Already have an account?</span>
                 <button type="button" onClick={() => switchTo("signin")} className="text-primary hover:text-primary-light">
                   Sign in
                 </button>
               </>
+            ) : (
+              <button type="button" onClick={() => switchTo("signin")} className="text-primary hover:text-primary-light">
+                Back to sign in
+              </button>
             )}
           </div>
         </form>
