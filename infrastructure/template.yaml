@@ -20,9 +20,9 @@ Parameters:
     Type: String
     Default: https://pjpangilinan.github.io
     Description: >
-      Where the site is served from, without a trailing slash. Cognito redirects
-      back here after sign-in, so this has to be the deployed site and nothing
-      else. AllowedOrigins below must include it.
+      Where the site is served from, without a trailing slash. This is the Origin
+      the browser sends on every API call, so it has to be the deployed site and
+      nothing else. AllowedOrigins below must include it.
   AllowedOrigins:
     Type: CommaDelimitedList
     Default: https://pjpangilinan.github.io
@@ -141,18 +141,22 @@ Resources:
           Required: true
           Mutable: false
 
-  # A public client: no secret, because the browser cannot keep one. The
-  # authorization code flow with PKCE is what makes that safe, and it is why
-  # there is no client secret to configure or leak.
+  # A public client: no secret, because the browser cannot keep one. The browser
+  # signs in with USER_PASSWORD_AUTH against this same client, so a public client
+  # is not merely tolerated here, it is what the application depends on.
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
       ClientName: canens-web
       UserPoolId: !Ref UserPool
       GenerateSecret: false
-      # Must be true or AllowedOAuthFlows, CallbackURLs, LogoutURLs and the
-      # scopes are all ignored and only SDK sign-in is permitted - which would
-      # leave the hosted UI unreachable with no error anywhere.
+      # The authorization-code settings below describe a flow this client does
+      # not currently use. The application's sign-in posts to the pool's action
+      # API instead, because every endpoint on the OIDC surface answers 400 for
+      # this pool and the pool's own discovery document advertises those broken
+      # endpoints. They are kept because they are what a pool domain would need,
+      # and adding a domain would also bring back password reset, which is a
+      # hosted-UI page. See infrastructure/README.md.
       AllowedOAuthFlowsUserPoolClient: true
       AllowedOAuthFlows:
         - code
@@ -170,10 +174,8 @@ Resources:
         - COGNITO
       ExplicitAuthFlows:
         - ALLOW_REFRESH_TOKEN_AUTH
-        # Username and password, for anything that is not a browser: the
-        # screenshot walkthrough needs a token, and there is no way to drive a
-        # hosted-UI redirect from a script. The browser itself uses the `code`
-        # flow above and never touches this.
+        # Username and password. This is how the browser signs in, and also how
+        # the screenshot walkthrough gets a token without driving a form.
         - ALLOW_USER_PASSWORD_AUTH
       # Do not reveal whether an account exists, so the sign-in form cannot be
       # used to enumerate who has signed up.

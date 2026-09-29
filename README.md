@@ -23,8 +23,9 @@ The walkthrough is not mock data. It is
 a real browser against the deployed API with real model calls, regenerated with
 `CANENS_SCREENSHOTS=1 npx playwright test walkthrough.spec.ts`.
 
-**Sign in.** Cognito's hosted UI, so the password never passes through this
-application. Sign-up is open.
+**Sign in.** The form posts straight to Cognito's action API. The password reaches
+no other host and nothing is stored here, but there is no hosted sign-up page
+and **no password reset** - see [Sharp edges](#sharp-edges). Sign-up is open.
 
 ![Signed out](screenshots/01-signed-out.png)
 
@@ -100,7 +101,7 @@ one-way door.
 Browser                     API Gateway             Lambda
 ─────────                   ────────────            ──────
 Next.js static export   →   HTTP API          →    FastAPI behind Mangum
-  hosted UI sign-in         JWT authorizer          subject from claims
+  action-API sign-in         JWT authorizer          subject from claims
 Dexie / IndexedDB                                     │
     └── background upload ─────────────────────────→│
                                                        ├─→ S3        snapshots/<sub>.json
@@ -128,7 +129,10 @@ Everything downstream is keyed by that subject. The snapshot is
 table serve every account with no query and no way to enumerate across users.
 
 The app is a public client with no secret, because a browser cannot keep one.
-Sign-in is the hosted UI over the authorization-code flow with PKCE.
+Sign-in posts to Cognito's action API (`SignUp`, `ConfirmSignUp`, `InitiateAuth`).
+Public-client requests are unsigned, so there is no key in the bundle and no
+SigV4 to do. The access token is the same one the authorizer checks, and it is
+verified end to end against the deployed API.
 
 ### Why there is no database and no VPC
 
@@ -246,9 +250,27 @@ Six things that cost time, kept here so they do not cost it twice.
 - **A named API Gateway stage breaks routing.** It prepends the stage name to
   the path the function receives, so the greedy route hands Mangum
   `/prod/api/health` and everything 404s in FastAPI. The stage is `$default`.
-- **`AllowedOAuthFlowsUserPoolClient` defaults to false.** With it false, the
-  callback URLs, logout URLs, scopes and flows are all ignored and only SDK
-  sign-in works. The hosted UI is simply unreachable, with no error anywhere.
+- **Cognito's OIDC surface does not work for this pool; its action API does.**
+  `/oauth2/authorize`, `/authorize`, `/oauth2/token`, `/login` and `/userInfo` all
+  answer `400 BadRequest — "The server did not understand the operation that was
+  requested"`, and the pool's own discovery document advertises those broken
+  endpoints. The domain the hosted UI would live on is not exposed by any API, so
+  it cannot be addressed. A redirect-based sign-in therefore cannot be made to
+  work here, and it fails silently from the app's point of view: the button is
+  there, the unit tests pass, and the only symptom is a 400 in the browser.
+
+  What does work is the action API — `SignUp`, `ConfirmSignUp`, `InitiateAuth`,
+  `RefreshToken` — the surface boto3 and the AWS SDKs call. A user pool *client*
+  is public, so its requests are unsigned and need no key, and Cognito answers
+  with `Access-Control-Allow-Origin: *`, so a browser can call it. That is what
+  `web/lib/auth.ts` does now.
+
+  The cost of leaving the hosted UI: **there is no password reset.** Reset is a
+  hosted-UI page, and without it someone who forgets their password has to be
+  helped another way. Adding a domain to the pool is what would make the hosted
+  UI reachable, and with it reset, and it is the fix worth doing before this has
+  real users. `web/tests/e2e/signup.spec.ts` performs a real sign-up and sign-in
+  against the live pool, because nothing cheaper catches this.
 - **`CORSConfiguration` needs a list, not a comma-separated string.** API
   Gateway matches origins by exact string, so one element of `"a,b"` matches
   neither, and the preflight returns with no `Access-Control-Allow-Origin` at
@@ -259,8 +281,9 @@ Six things that cost time, kept here so they do not cost it twice.
 | Path | |
 | --- | --- |
 | `web/` | Next.js static export. Dexie over IndexedDB is the store. |
-| `web/lib/auth.ts` | Cognito hosted UI, PKCE, session. |
+| `web/lib/auth.ts` | Cognito action-API client, session, refresh. |
 | `backend/` | FastAPI. Health, two model calls, snapshot. |
 | `infrastructure/` | SAM template, Cognito, and why the network is shaped as it is. |
 | `web/tests/e2e/walkthrough.spec.ts` | Regenerates the screenshots above. |
+| `web/tests/e2e/signup.spec.ts` | Real sign-up and sign-in against the live pool. |
 | `verify.ps1` | Everything, including the billable passes. |

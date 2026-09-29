@@ -23,7 +23,7 @@ import { isApiConfigured } from "../lib/config";
  *     API that will reject every call.
  */
 export default function Page() {
-  const { status, email, signIn, signOut } = useAuth();
+  const { status, session, signOut, recheck } = useAuth();
 
   if (status === "loading") {
     return (
@@ -49,8 +49,8 @@ export default function Page() {
   }
 
   if (status === "signed-out") {
-    return <SignIn onSignIn={signIn} />;
+    return <SignIn onSignedIn={recheck} />;
   }
 
-  return <Home onSignOut={signOut} signedInAs={email} />;
+  return <Home onSignOut={signOut} signedInAs={session?.email ?? ""} />;
 }

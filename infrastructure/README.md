@@ -4,7 +4,7 @@ A single self-contained CloudFormation stack, `canens-prod`, built with SAM.
 
 | Resource | Purpose | Monthly |
 | --- | --- | --- |
-| Cognito user pool + client | Sign-in, via the hosted UI | free |
+| Cognito user pool + client | Sign-in, via the action API | free |
 | Lambda (container image) | The FastAPI app, built from `backend/Dockerfile` | pennies |
 | API Gateway HTTP API | The routes, with a JWT authorizer | pennies |
 | S3 bucket | The whole-store snapshot, one object per user | ~$0 |
@@ -28,12 +28,39 @@ enumerate across users.
 `GET /api/health` is the one unauthenticated route, so an uptime check needs no
 token and cannot be turned into a way to spend money.
 
-### Two Cognito settings that fail silently
+### How the client signs in, and what that costs
 
-**`AllowedOAuthFlowsUserPoolClient` defaults to `false`.** With it false the
-callback URLs, logout URLs, scopes and OAuth flows are all ignored and only SDK
-sign-in is permitted. The hosted UI is unreachable and nothing reports an error.
-It must be `true`.
+The obvious design is a redirect to the hosted UI over the authorization-code
+flow with PKCE, and the template still describes that. **It cannot work for this
+pool.** Every path on the OIDC surface answers `400 BadRequest — "The server did
+not understand the operation that was requested"`:
+
+```
+/oauth2/authorize   /authorize   /oauth2/token   /login   /userInfo
+```
+
+The pool's own `.well-known/openid-configuration` advertises those endpoints, so
+a client that trusts discovery is sent somewhere that only ever returns 400. The
+domain the hosted UI lives on is not exposed by any API, so it cannot be reached
+directly either.
+
+The action API — `SignUp`, `ConfirmSignUp`, `InitiateAuth` — works. That is the
+surface boto3 and the AWS SDKs call. A user pool *client* is public, so its
+requests are unsigned: no SigV4, no secret, and nothing to leak from a bundle.
+Cognito replies with `Access-Control-Allow-Origin: *`, so a page can call it. The
+browser signs in directly, and the token it gets is the one the authorizer
+checks.
+
+What is given up: no hosted sign-up page and **no password reset**, because reset
+is a hosted-UI page. A pool domain is what would restore both, and it is the
+first thing to add before this has real users.
+
+Two settings that used to matter here, kept because the template still sets them
+and they are correct for a pool that later gets a domain: `CallbackURLs` and
+`AllowedOAuthFlows` describe the authorization-code flow, which the client does
+not use. Leaving them costs nothing and means adding a domain is one change.
+
+### Two Cognito settings that fail silently
 
 **Token validity has no shared default unit.** An access token is measured in
 hours and a refresh token in days, so `TokenValidityUnits` is set explicitly;
@@ -98,9 +125,9 @@ Then point the frontend at the `ApiEndpoint` output. There is no stage segment:
 the stage is `$default`, because a named stage is prepended to the path the
 function receives and every request then 404s in FastAPI.
 
-`AllowedOrigins` must include `FrontendOrigin`, because that is where Cognito
-redirects back to and what the browser sends as its `Origin`. Add
-`http://localhost:3000` to it to run the site against the deployed API locally.
+`AllowedOrigins` must include `FrontendOrigin`, because that is the `Origin` the
+browser sends on every API call. Add `http://localhost:3000` to it to run the
+site against the deployed API locally.
 
 ## Four things that will bite you
 
@@ -126,7 +153,9 @@ on the strength of that answer. The grant is scoped to the one prefix.
 
 **`AllowedOAuthFlowsUserPoolClient`.** It defaults to false, and with it false
 Cognito ignores the callback URLs, the logout URLs, the scopes and the OAuth
-flows. Only SDK sign-in works, the hosted UI is unreachable, and nothing says so.
+flows. It is set to true in the template, but it makes no difference: the OIDC
+surface this would enable answers 400 for this pool anyway. Kept because it is
+what a pool domain would need.
 
 ## What is deliberately absent
 
@@ -136,8 +165,10 @@ flows. Only SDK sign-in works, the hosted UI is unreachable, and nothing says so
   the per-account cap, throttling and a budget alarm rather than with rules that would
   have to understand the traffic to be useful.
 - **MFA.** Not enabled, because the pool is for a personal tracker and Cognito's
-  hosted UI is where it would be configured. `MfaConfiguration: "OFF"` is
-  explicit in the template so the decision is visible rather than default.
+  hosted UI is where it would be configured - which the client does not use, so
+  enabling it would lock people out with no way to complete the challenge.
+  `MfaConfiguration: "OFF"` is explicit in the template so the decision is
+  visible rather than default.
 - **CI deployment.** The workflow builds and publishes the frontend. The backend
   is deployed by hand.
 - **Bucket deletion on stack delete.** The bucket has `DeletionPolicy: Retain`.

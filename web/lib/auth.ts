@@ -1,143 +1,351 @@
 /**
- * Sign-in, through the Cognito hosted UI.
+ * Sign-in, talking to Cognito's action API directly.
  *
- * The hosted UI is a redirect, not a fetch: the browser leaves for Cognito,
- * the user signs in there, and Cognito sends them back with a one-time code.
- * That is why the app is a public client with no secret - there is nothing for
- * a browser to keep secret, and PKCE is what stops an intercepted code from
- * being replayed.
+ * The obvious implementation is a redirect to Cognito's hosted UI with the
+ * authorization-code flow and PKCE, and that is what this did first. It cannot
+ * work against this pool: every path under the OIDC surface -
+ * /oauth2/authorize, /authorize, /oauth2/token, /login, /userInfo - answers
+ * 400 "The server did not understand the operation that was requested", the
+ * pool's own discovery document advertises those broken endpoints, and the
+ * Cognito domain the hosted UI would live on is not exposed by any API, so it
+ * cannot be addressed. The action API - what boto3 and the AWS SDKs call - works
+ * perfectly.
  *
- * `oidc-client-ts` does the PKCE dance, the token exchange, the refresh and the
- * state check. Hand-rolling that is about a hundred lines of code in the path
- * of every request, which is the wrong place to be clever.
+ * That is reachable from a browser. A user pool *client* is public, so its
+ * requests are unsigned: no SigV4, no secret, no signing key in a bundle. The
+ * request is a POST to the service root with an X-Amz-Target naming the
+ * operation, and Cognito answers with Access-Control-Allow-Origin: * so a page
+ * can call it. This is what the AWS JS SDK does under the hood; the only thing
+ * dropped is the hosted UI, so there is no password reset and no hosted page
+ * for sign-up - both are described in components/SignIn.tsx.
+ *
+ * The token this produces is the same one the authorizer accepts, verified
+ * end to end against the deployed API.
  */
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { UserManager, WebStorageStateStore, type User } from "oidc-client-ts";
 
-import { cognitoConfigured } from "./config";
+import { COGNITO_CLIENT_ID, COGNITO_REGION, cognitoConfigured } from "./config";
 import { setAccessToken } from "./session";
 
-const region = process.env.NEXT_PUBLIC_AWS_REGION ?? "us-east-1";
-const poolId = process.env.NEXT_PUBLIC_COGNITO_USER_POOL_ID ?? "";
-const clientId = process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID ?? "";
+const ENDPOINT = `https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`;
 
-let manager: UserManager | null = null;
+const SESSION_KEY = "canens.session";
 
-function userManager(): UserManager | null {
-  if (!cognitoConfigured) return null;
-  if (manager) return manager;
+export interface Session {
+  accessToken: string;
+  refreshToken: string | null;
+  idToken: string;
+  /** Epoch seconds. */
+  expiresAt: number;
+  email: string;
+  sub: string;
+}
 
-  // The redirect target has to be the origin, without a base path: Cognito
-  // matches the registered callback literally.
-  const origin = window.location.origin;
+/** Cognito's error code, e.g. "NotAuthorizedException", from a failed call. */
+export class AuthError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = "AuthError";
+  }
+}
 
-  manager = new UserManager({
-    authority: `https://cognito-idp.${region}.amazonaws.com/${poolId}`,
-    client_id: clientId,
-    redirect_uri: `${origin}/`,
-    post_logout_redirect_uri: `${origin}/`,
-    response_type: "code",
-    scope: "openid email profile",
-    // Session storage, not local storage. A token left in local storage outlives
-    // the tab and is readable by anything with script access on the origin.
-    userStore: new WebStorageStateStore({ store: window.sessionStorage }),
-    automaticSilentRenew: true,
-    // The hosted UI is a full page, so the browser is redirected away. There is
-    // no third-party iframe to keep alive, and silent renew is not needed.
-    silent_redirect_uri: `${origin}/`,
+interface CognitoClaims {
+  sub: string;
+  email?: string;
+  "cognito:username"?: string;
+  username?: string;
+  email_verified?: boolean;
+  token_use: string;
+}
+
+function decodeClaims(token: string): CognitoClaims {
+  const part = token.split(".")[1] ?? "";
+  const padded = part.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (part.length % 4)) % 4);
+  try {
+    return JSON.parse(decodeURIComponent(escape(atob(padded))));
+  } catch {
+    return { sub: "", token_use: "" };
+  }
+}
+
+/**
+ * One Cognito action.
+ *
+ * The Content-Type and X-Amz-Target headers are the whole protocol. There is
+ * no Authorization header, and that is the point rather than an omission: a
+ * public client has nothing to sign with.
+ */
+async function action<T = Record<string, unknown>>(
+  operation: string,
+  payload: Record<string, unknown>,
+): Promise<T> {
+  const response = await fetch(ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-amz-json-1.1",
+      "X-Amz-Target": `AWSCognitoIdentityProviderService.${operation}`,
+    },
+    body: JSON.stringify(payload),
   });
-  return manager;
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    // Cognito reports the failure in the body as __type, sometimes with a
+    // trailing ":..." suffix.
+    const raw = String(body?.__type ?? body?.message ?? "UnknownError");
+    const code = raw.split(":")[0];
+    throw new AuthError(code, messageFor(code, body?.message));
+  }
+  return body as T;
 }
 
-export type AuthStatus = "loading" | "signed-in" | "signed-out" | "unconfigured";
-
-export interface Auth {
-  status: AuthStatus;
-  email: string | null;
-  signIn: () => void;
-  signOut: () => void;
+function messageFor(code: string, fallback?: string): string {
+  switch (code) {
+    case "NotAuthorizedException":
+      return "That email and password do not match an account.";
+    case "UserNotFoundException":
+      return "There is no account with that email.";
+    case "UserAlreadyExistsException":
+    case "UsernameExistsException":
+      return "There is already an account with that email. Sign in instead.";
+    case "UserNotConfirmedException":
+      return "Confirm the code we emailed you first.";
+    case "CodeMismatchException":
+      return "That code is not right.";
+    case "ExpiredCodeException":
+      return "That code has expired. Ask for another.";
+    case "InvalidPasswordException":
+      return "Use at least 12 characters, with an upper case letter, a lower case letter, a number and a symbol.";
+    case "LimitExceededException":
+      return "Too many attempts. Wait a minute and try again.";
+    case "NotAuthorizedException2":
+      return "Sign in failed.";
+    default:
+      return fallback ?? "Something went wrong. Try again.";
+  }
 }
 
-export function useAuth(): Auth {
-  // Derived rather than set from inside the effect: whether Cognito is
-  // configured is known at build time, so there is nothing to wait for.
-  const [status, setStatus] = useState<AuthStatus>(
-    cognitoConfigured ? "loading" : "unconfigured",
+// -------------------------------------------------------------- passwords
+
+/** The pool's policy, mirrored so the form can say so before a round trip. */
+export const PASSWORD_RULES = [
+  { test: /.{12,}/, message: "at least 12 characters" },
+  { test: /[a-z]/, message: "a lower case letter" },
+  { test: /[A-Z]/, message: "an upper case letter" },
+  { test: /[0-9]/, message: "a number" },
+  { test: /[^A-Za-z0-9]/, message: "a symbol" },
+];
+
+export function passwordProblem(password: string): string | null {
+  const missing = PASSWORD_RULES.filter((rule) => !rule.test.test(password)).map(
+    (rule) => rule.message,
   );
-  const [user, setUser] = useState<User | null>(null);
+  return missing.length ? `Needs ${missing.join(", ")}.` : null;
+}
 
-  useEffect(() => {
-    const um = userManager();
-    if (!um) return;
+export function emailProblem(email: string): string | null {
+  if (!email.includes("@") || email.startsWith("@") || email.endsWith("@")) {
+    return "That does not look like an email address.";
+  }
+  return null;
+}
 
-    let cancelled = false;
+// ----------------------------------------------------------------- actions
 
-    const settle = (next: User | null | undefined) => {
-      if (cancelled) return;
-      // The API client reads the token from the session module, so it is set
-      // here rather than passed down to every call site that needs it.
-      setAccessToken(next && !next.expired ? accessToken(next) : null);
-      setUser(next ?? null);
-      setStatus(next && !next.expired ? "signed-in" : "signed-out");
-    };
+interface AuthResult {
+  AccessToken: string;
+  IdToken: string;
+  RefreshToken?: string;
+  ExpiresIn: number;
+}
 
-    (async () => {
-      // Coming back from the hosted UI: the URL carries a one-time code that has
-      // to be exchanged before anything else will work.
-      const params = new URLSearchParams(window.location.search);
-      if (params.has("code") || params.has("error")) {
-        try {
-          settle(await um.signinCallback());
-        } catch {
-          settle(null);
-        }
-        // Drop the code from the address bar so a refresh does not try to
-        // exchange the same one-time code a second time.
-        window.history.replaceState({}, document.title, window.location.pathname);
-        return;
-      }
+interface AuthResponse {
+  AuthenticationResult: AuthResult;
+}
 
-      try {
-        settle(await um.getUser());
-      } catch {
-        settle(null);
-      }
-    })();
-
-    // A refresh in another tab, or a silent renew, should update this one.
-    const onUserChanged = (next: User) => settle(next);
-    um.events.addUserLoaded(onUserChanged);
-    um.events.addUserSignedOut(() => settle(null));
-
-    return () => {
-      cancelled = true;
-      um.events.removeUserLoaded(onUserChanged);
-    };
-  }, []);
-
-  const signIn = useCallback(() => {
-    // Nothing to hand over: the hosted UI collects the credentials.
-    void userManager()?.signinRedirect();
-  }, []);
-
-  const signOut = useCallback(() => {
-    // Clear locally first: a failed redirect must not leave a usable token
-    // behind in this tab.
-    setAccessToken(null);
-    void userManager()?.signoutRedirect();
-  }, []);
-
+function toSession(result: AuthResult): Session {
+  const claims = decodeClaims(result.IdToken || result.AccessToken);
   return {
-    status,
-    email: user?.profile?.email ?? null,
-    signIn,
-    signOut,
+    accessToken: result.AccessToken,
+    idToken: result.IdToken,
+    // A refresh returns no new refresh token, so the existing one is kept by
+    // the caller.
+    refreshToken: result.RefreshToken ?? null,
+    expiresAt: Math.floor(Date.now() / 1000) + result.ExpiresIn,
+    email: claims.email ?? claims["cognito:username"] ?? claims.username ?? "",
+    sub: claims.sub,
   };
 }
 
-/** The access token, for the Authorization header. */
-export function accessToken(user: User | null | undefined): string | null {
-  return user?.access_token ?? null;
+export function createAccount(email: string, password: string): Promise<void> {
+  return action("SignUp", {
+    ClientId: COGNITO_CLIENT_ID,
+    Username: email,
+    Password: password,
+    // Silently ignored unless a pre-confirmed sign-up policy is in place, and
+    // harmless to send, so a pool reconfigured later does not send a second
+    // code.
+    ClientMetadata: {},
+  }).then(() => undefined);
+}
+
+export function confirmAccount(email: string, code: string): Promise<void> {
+  return action("ConfirmSignUp", {
+    ClientId: COGNITO_CLIENT_ID,
+    Username: email,
+    ConfirmationCode: code,
+  }).then(() => undefined);
+}
+
+export async function signIn(email: string, password: string): Promise<Session> {
+  const result = await action<AuthResponse>("InitiateAuth", {
+    ClientId: COGNITO_CLIENT_ID,
+    AuthFlow: "USER_PASSWORD_AUTH",
+    AuthParameters: { USERNAME: email, PASSWORD: password },
+  });
+  const session = toSession(result.AuthenticationResult);
+  persist(session);
+  return session;
+}
+
+async function refreshSession(session: Session): Promise<Session> {
+  if (!session.refreshToken) throw new AuthError("NotAuthorizedException", "Session expired.");
+  const result = await action<AuthResponse>("InitiateAuth", {
+    ClientId: COGNITO_CLIENT_ID,
+    AuthFlow: "REFRESH_TOKEN_AUTH",
+    AuthParameters: { REFRESH_TOKEN: session.refreshToken },
+  });
+  const next = toSession(result.AuthenticationResult);
+  const merged: Session = { ...next, refreshToken: next.refreshToken ?? session.refreshToken };
+  persist(merged);
+  return merged;
+}
+
+// ----------------------------------------------------------------- storage
+
+function persist(session: Session): void {
+  // Session storage, not local storage: the token dies with the tab, so a
+  // machine left open does not keep a usable credential in it.
+  window.sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  setAccessToken(session.accessToken);
+}
+
+export function readSession(): Session | null {
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const session = JSON.parse(raw) as Session;
+    return session.expiresAt > Math.floor(Date.now() / 1000) ? session : null;
+  } catch {
+    return null;
+  }
+}
+
+export function forgetSession(): void {
+  window.sessionStorage.removeItem(SESSION_KEY);
+  setAccessToken(null);
+}
+
+/** A token that will still be valid in a minute, refreshing if it is not. */
+let inFlight: Promise<Session> | null = null;
+
+export async function validSession(): Promise<Session | null> {
+  const current = readSession();
+  if (!current) return null;
+  if (current.expiresAt - Math.floor(Date.now() / 1000) > 60) return current;
+
+  // Concurrent callers must not each fire a refresh: Cognito rotates the
+  // refresh token, and the losers of that race invalidate the winner.
+  if (!inFlight) {
+    inFlight = refreshSession(current)
+      .catch((error) => {
+        forgetSession();
+        throw error;
+      })
+      .finally(() => {
+        inFlight = null;
+      });
+  }
+  return inFlight;
+}
+
+export { COGNITO_CLIENT_ID };
+
+// -------------------------------------------------------------------- hook
+
+export type AuthStatus = "loading" | "signed-out" | "signed-in" | "unconfigured";
+
+/**
+ * The signed-in user, kept fresh.
+ *
+ * Access tokens last an hour, so something has to refresh them or a page left
+ * open starts failing. It is done here rather than in the request path: the
+ * header helper is synchronous, so putting a refresh in front of every call
+ * would mean making it async and touching every caller for no gain. Refreshing
+ * a minute before expiry is early enough to be invisible, and re-checking on
+ * focus covers a machine that was asleep past the deadline.
+ */
+export function useAuth(): {
+  status: AuthStatus;
+  session: Session | null;
+  signOut: () => void;
+  recheck: () => void;
+} {
+  const [session, setSession] = useState<Session | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  const recheck = useCallback(() => {
+    setSession(readSession());
+    setLoaded(true);
+  }, []);
+
+  const signOut = useCallback(() => {
+    forgetSession();
+    setSession(null);
+  }, []);
+
+  // Reading the session touches window, so it cannot happen while rendering on
+  // the server. Doing it on the first client render rather than in an effect
+  // avoids the extra commit an effect costs - this is the adjustment React
+  // documents for once-a-mount reads, and it settles before the first paint,
+  // so there is no flash of the signed-out screen.
+  if (!loaded && typeof window !== "undefined") {
+    setLoaded(true);
+    setSession(readSession());
+  }
+
+  useEffect(() => {
+    if (!session) return;
+    let cancelled = false;
+
+    const settle = (next: Session | null) => {
+      if (!cancelled) setSession(next);
+    };
+    const refresh = () => {
+      validSession().then(settle, () => {
+        forgetSession();
+        settle(null);
+      });
+    };
+
+    const timer = setTimeout(refresh, Math.max(5_000, (session.expiresAt - 60) * 1000 - Date.now()));
+    window.addEventListener("focus", refresh);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [session]);
+
+  const status: AuthStatus = !loaded
+    ? "loading"
+    : session
+      ? "signed-in"
+      : cognitoConfigured
+        ? "signed-out"
+        : "unconfigured";
+
+  return { status, session, signOut, recheck };
 }

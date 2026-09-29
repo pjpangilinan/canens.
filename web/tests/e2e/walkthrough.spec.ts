@@ -1,7 +1,6 @@
 /**
  * A walk through the app as a new user, against the deployed API, capturing a
- * screenshot at every step. Sign-in goes through the real Cognito hosted UI,
- * so the redirect, the PKCE exchange and the token refresh are all exercised.
+ * screenshot at every step.
  *
  * This is not part of the test suite. It calls Bedrock for real and rewrites
  * the stored snapshot, so it is skipped unless it is asked for:
@@ -66,13 +65,12 @@ function createConfirmedUser(): void {
 /**
  * A real Cognito session, obtained through the SDK.
  *
- * The app signs in through the hosted UI, which is a redirect to
- * cognito-idp.<region>.amazonaws.com/<pool>/oauth2/authorize. That surface is
- * not reachable from the machine this was recorded on - the pool's
- * amazoncognito.com domain does not resolve there - so the redirect itself is
- * not exercised here. Everything after it is: the token is a genuine Cognito
- * access token, the API Gateway authorizer really verifies it, and the
- * application reads it through the same session store the redirect fills.
+ * The app signs in through its own form, which posts to Cognito's action API -
+ * see lib/auth.ts. Here the token is fetched through the SDK instead, because
+ * this run does not care about the form and getting a token into a page should
+ * not depend on a mailbox. The token is a genuine Cognito access token, the API
+ * Gateway authorizer really verifies it, and the application reads it through
+ * the same session store a real sign-in fills.
  *
  * The alternative, injecting a header the app trusts, would not test anything.
  */
@@ -98,30 +96,26 @@ async function signIn(page: Page): Promise<void> {
     ]),
   ) as { AccessToken: string; IdToken: string; ExpiresIn: number };
 
-  // Decode the ID token for the claims oidc-client-ts expects in its stored user.
   const claims = JSON.parse(
     Buffer.from(auth.IdToken.split(".")[1], "base64url").toString("utf8"),
   ) as Record<string, unknown>;
 
-  // The key oidc-client-ts reads, and the shape it writes. Matching it means
-  // the application is signed in through its own normal path.
-  const authority = `https://cognito-idp.${REGION}.amazonaws.com/${POOL}`;
+  // The exact shape lib/auth.ts persists, so the application is signed in
+  // through its own normal path rather than a test-only back door.
   const stored = {
-    id_token: auth.IdToken,
-    access_token: auth.AccessToken,
-    refresh_token: null,
-    token_type: "Bearer",
-    scope: "openid email profile",
-    session_state: null,
-    expires_at: Math.floor(Date.now() / 1000) + auth.ExpiresIn,
-    profile: { sub: claims.sub, email: claims.email, email_verified: true },
+    accessToken: auth.AccessToken,
+    idToken: auth.IdToken,
+    refreshToken: null,
+    expiresAt: Math.floor(Date.now() / 1000) + auth.ExpiresIn,
+    email: String(claims.email ?? EMAIL),
+    sub: String(claims.sub),
   };
 
   await page.addInitScript(
     ({ key, value }) => {
       window.sessionStorage.setItem(key, value);
     },
-    { key: `oidc.user:${authority}:${CLIENT}`, value: JSON.stringify(stored) },
+    { key: "canens.session", value: JSON.stringify(stored) },
   );
 }
 
@@ -157,19 +151,13 @@ function api(request: APIRequestContext, bearer: string) {
 /** The access token the app is holding, from its own session storage. */
 async function readAccessToken(page: Page): Promise<string | null> {
   return page.evaluate(() => {
-    for (let i = 0; i < window.sessionStorage.length; i += 1) {
-      const key = window.sessionStorage.key(i) ?? "";
-      if (!key.startsWith("oidc.user:")) continue;
-      const raw = window.sessionStorage.getItem(key);
-      if (!raw) continue;
-      try {
-        const user = JSON.parse(raw);
-        if (user?.access_token) return user.access_token as string;
-      } catch {
-        // Not the entry we are after.
-      }
+    const raw = window.sessionStorage.getItem("canens.session");
+    if (!raw) return null;
+    try {
+      return (JSON.parse(raw) as { accessToken?: string }).accessToken ?? null;
+    } catch {
+      return null;
     }
-    return null;
   });
 }
 
