@@ -205,4 +205,75 @@ test.describe("Canens", () => {
     await page.getByRole("link", { name: "Home" }).click();
     await expect(page.getByRole("heading", { name: goalTitle })).toBeVisible();
   });
+
+  test("renaming a goal supports escape cancellation and enter saving", async ({ page }) => {
+    const original = `Original Goal ${Date.now()}`;
+    await page.getByLabel("New goal").fill(original);
+    await page.getByLabel("New goal").press("Enter");
+    await expect(page.getByRole("heading", { name: original })).toBeVisible();
+
+    // Click rename button
+    await page.getByRole("button", { name: `Rename "${original}"` }).click();
+    const renameInput = page.getByRole("textbox", { name: `Rename "${original}"` });
+    await expect(renameInput).toBeVisible();
+
+    // Type something else and press Escape to cancel
+    await renameInput.fill("Cancelled Name");
+    await renameInput.press("Escape");
+    await expect(page.getByRole("heading", { name: original })).toBeVisible();
+
+    // Now rename and save with Enter
+    await page.getByRole("button", { name: `Rename "${original}"` }).click();
+    const updated = `Updated Goal ${Date.now()}`;
+    const activeInput = page.getByRole("textbox", { name: `Rename "${original}"` });
+    await activeInput.fill(updated);
+    await activeInput.press("Enter");
+
+    await expect(page.getByRole("heading", { name: updated })).toBeVisible();
+  });
+
+  test("step creation and inline editing support escape cancellation and deletion", async ({ page }) => {
+    const goalTitle = `Step Ops ${Date.now()}`;
+    await page.getByLabel("New goal").fill(goalTitle);
+    await page.getByLabel("New goal").press("Enter");
+    await expect(page.getByRole("heading", { name: goalTitle })).toBeVisible();
+
+    await page.getByRole("button", { name: `Expand ${goalTitle}` }).click();
+
+    // Open add step, press Escape to cancel
+    await page.getByRole("button", { name: "Add step" }).click();
+    const stepInput = page.getByLabel(`Add a step to "${goalTitle}"`);
+    await expect(stepInput).toBeVisible();
+    await stepInput.press("Escape");
+    await expect(stepInput).toBeHidden();
+
+    // Now add a real step
+    await page.getByRole("button", { name: "Add step" }).click();
+    const addInput = page.getByLabel(`Add a step to "${goalTitle}"`);
+    await addInput.fill("Initial Step Name");
+    await addInput.press("Enter");
+    await expect(page.getByText("Initial Step Name")).toBeVisible();
+
+    // Edit step and cancel with Escape
+    await page.getByRole("button", { name: 'Edit "Initial Step Name"' }).click();
+    const editInput = page.getByLabel("Step title");
+    await expect(editInput).toBeVisible();
+    await editInput.fill("Cancelled Step Edit");
+    await editInput.press("Escape");
+    await expect(page.getByText("Initial Step Name")).toBeVisible();
+
+    // Edit step and save with Enter
+    await page.getByRole("button", { name: 'Edit "Initial Step Name"' }).click();
+    await page.getByLabel("Step title").fill("Saved Step Edit");
+    await page.getByLabel("Step title").press("Enter");
+    await expect(page.getByText("Saved Step Edit")).toBeVisible();
+
+    // Delete step
+    await page.getByRole("button", { name: 'Delete "Saved Step Edit"' }).click();
+    await expect(page.getByText("Saved Step Edit")).toBeHidden();
+
+    // Delete entire goal
+    await page.getByRole("button", { name: `Delete "${goalTitle}"` }).click();
+    await expect(page.getByRole("heading", { name: goalTitle })).toBeHidden();
+  });
 });

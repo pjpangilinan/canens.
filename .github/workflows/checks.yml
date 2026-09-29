@@ -50,13 +50,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
-      - name: Build
-        env:
-          NEXT_PUBLIC_API_URL: https://example.invalid
-        run: npm run build
-
       - name: Install Playwright
         run: npx playwright install --with-deps chromium
 
       - name: Standalone E2E Tests
-        run: npx playwright test
+        run: npm run test:e2e

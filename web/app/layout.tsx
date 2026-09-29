@@ -40,7 +40,6 @@ function contentSecurityPolicy(): string | null {
     "img-src 'self' data:",
     "font-src 'self'",
     `connect-src 'self' ${new URL(api).origin} https://cognito-idp.${region}.amazonaws.com`,
-    "frame-ancestors 'none'",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -71,16 +70,18 @@ export default function RootLayout({
           <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
             <Link
               href="/"
+              prefetch={false}
               className="text-xl font-bold text-foreground tracking-tight hover:opacity-80 transition-opacity"
             >
               Canens<span className="text-primary">.</span>
             </Link>
             <div className="flex space-x-6">
-              <Link href="/" className="text-sm font-medium text-muted hover:text-foreground transition-colors">
+              <Link href="/" prefetch={false} className="text-sm font-medium text-muted hover:text-foreground transition-colors">
                 Home
               </Link>
               <Link
                 href="/activity"
+                prefetch={false}
                 className="text-sm font-medium text-muted hover:text-foreground transition-colors"
               >
                 Activity Log
