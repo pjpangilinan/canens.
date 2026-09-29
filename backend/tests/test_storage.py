@@ -44,7 +44,7 @@ def test_a_corrupt_object_is_an_error_not_an_empty_snapshot(s3):
 
 def test_absent_fields_default_to_empty(s3):
     s3.objects["snapshots/u.json"] = {}
-    assert storage.load_snapshot("u") == {"goals": [], "tasks": [], "saved_at": None}
+    assert storage.load_snapshot("u") == {"goals": [], "tasks": [], "tombstones": {}, "saved_at": None}
 
 
 def test_save_then_load_is_a_faithful_round_trip(s3):

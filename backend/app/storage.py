@@ -60,17 +60,22 @@ def load_snapshot(user_id: str) -> dict[str, Any] | None:
     return {
         "goals": body.get("goals", []),
         "tasks": body.get("tasks", []),
+        "tombstones": body.get("tombstones", {}),
         "saved_at": body.get("saved_at"),
     }
 
 
 def save_snapshot(
-    user_id: str, goals: list[dict[str, Any]], tasks: list[dict[str, Any]]
+    user_id: str,
+    goals: list[dict[str, Any]],
+    tasks: list[dict[str, Any]],
+    tombstones: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     saved_at = datetime.now(timezone.utc)
     document = {
         "goals": goals,
         "tasks": tasks,
+        "tombstones": tombstones or {},
         "saved_at": saved_at.isoformat(),
     }
     client().put_object(
@@ -82,5 +87,14 @@ def save_snapshot(
     return {
         "goals": goals,
         "tasks": tasks,
+        "tombstones": tombstones or {},
         "saved_at": saved_at.isoformat(),
     }
+
+
+def delete_snapshot(user_id: str) -> None:
+    """Delete the user's snapshot from S3."""
+    client().delete_object(
+        Bucket=settings.snapshot_bucket,
+        Key=snapshot_key(user_id),
+    )

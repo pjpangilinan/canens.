@@ -5,7 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.deps import require_user
-from app.storage import MAX_SNAPSHOT_ROWS, load_snapshot, save_snapshot
+from app.storage import (
+    MAX_SNAPSHOT_ROWS,
+    delete_snapshot,
+    load_snapshot,
+    save_snapshot,
+)
 
 router = APIRouter(
     prefix="/api/backup",
@@ -17,12 +22,14 @@ router = APIRouter(
 class SnapshotIn(BaseModel):
     goals: list[dict[str, Any]] = Field(default_factory=list)
     tasks: list[dict[str, Any]] = Field(default_factory=list)
+    tombstones: dict[str, str] = Field(default_factory=dict)
 
 
 class SnapshotOut(BaseModel):
     exists: bool
     goals: list[dict[str, Any]] = []
     tasks: list[dict[str, Any]] = []
+    tombstones: dict[str, str] = {}
     saved_at: datetime | None = None
 
 
@@ -67,5 +74,30 @@ def upload_backup(snapshot: SnapshotIn, user_id=Depends(require_user)) -> Snapsh
                     detail=f"Field '{k}' exceeds maximum length of 2000 characters",
                 )
 
-    saved = save_snapshot(str(user_id), snapshot.goals, snapshot.tasks)
+    if len(snapshot.tombstones) > 5000:
+        raise HTTPException(status_code=413, detail="Too many tombstones")
+
+    saved = save_snapshot(
+        str(user_id),
+        snapshot.goals,
+        snapshot.tasks,
+        snapshot.tombstones,
+    )
     return SnapshotOut(exists=True, **saved)
+
+
+@router.delete("", status_code=204)
+def delete_backup(user_id=Depends(require_user)) -> None:
+    delete_snapshot(str(user_id))
+
+
+@router.get("/export")
+def export_backup(user_id=Depends(require_user)) -> dict[str, Any]:
+    stored = load_snapshot(str(user_id))
+    return {
+        "goals": stored.get("goals", []) if stored else [],
+        "tasks": stored.get("tasks", []) if stored else [],
+        "tombstones": stored.get("tombstones", {}) if stored else {},
+        "saved_at": stored.get("saved_at") if stored else None,
+        "exported_at": datetime.now().isoformat(),
+    }

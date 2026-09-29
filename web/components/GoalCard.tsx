@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Goal, GoalStatus, Task, TaskStatus } from "../lib/db";
-import { fetchNextSteps } from "../lib/api";
+import { streamNextSteps } from "../lib/api";
 import * as store from "../lib/store";
 import { flushBackupNow } from "../lib/backup";
 
@@ -38,6 +38,7 @@ export default function GoalCard({
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [editTaskTitle, setEditTaskTitle] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [streamSnippet, setStreamSnippet] = useState<string | null>(null);
   const [confirmArchive, setConfirmArchive] = useState<string | null>(null);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
 
@@ -102,10 +103,17 @@ export default function GoalCard({
 
   async function generate() {
     setGenerating(true);
+    setStreamSnippet(null);
     try {
-      const result = await fetchNextSteps(
+      const result = await streamNextSteps(
         goal.title,
         tasks.map((t) => ({ title: t.title, status: t.status })),
+        (token) => {
+          setStreamSnippet((prev) => {
+            const next = ((prev ?? "") + token).replace(/[\s\r\n]+/g, " ");
+            return next.length > 30 ? "..." + next.slice(-27) : next;
+          });
+        },
       );
 
       if (result.status === "done") {
@@ -120,6 +128,7 @@ export default function GoalCard({
       onError(`Could not generate next steps: ${(error as Error).message}`);
     } finally {
       setGenerating(false);
+      setStreamSnippet(null);
     }
   }
 
@@ -323,7 +332,7 @@ export default function GoalCard({
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                   </svg>
-                  <span>{generating ? "Thinking..." : "Generate steps"}</span>
+                  <span>{generating ? (streamSnippet ? `Drafting: ${streamSnippet}` : "Thinking...") : "Generate steps"}</span>
                 </button>
                 <button
                   onClick={() => setAddingTask(true)}

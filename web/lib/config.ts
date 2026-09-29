@@ -44,7 +44,11 @@ export const COGNITO_CLIENT_ID = clientId;
  * not have to know one exists.
  */
 export function apiHeaders(token?: string | null): Record<string, string> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const localDate = new Date().toLocaleDateString("en-CA");
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-Canens-Date": localDate,
+  };
   const bearer = token ?? getAccessToken();
   if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
   return headers;

@@ -78,6 +78,88 @@ export function scheduleBackup(): void {
   }, UPLOAD_DEBOUNCE_MS);
 }
 
+function toEpoch(iso: string | undefined | null): number {
+  if (!iso) return 0;
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
+
+export interface SnapshotData {
+  goals: Goal[];
+  tasks: Task[];
+  tombstones?: Record<string, string>;
+}
+
+export function mergeSnapshots(
+  local: SnapshotData,
+  remote: SnapshotData,
+): { goals: Goal[]; tasks: Task[]; tombstones: Record<string, string> } {
+  const mergedTombstones: Record<string, string> = {};
+
+  for (const [id, date] of Object.entries(local.tombstones ?? {})) {
+    mergedTombstones[id] = date;
+  }
+  for (const [id, date] of Object.entries(remote.tombstones ?? {})) {
+    if (!mergedTombstones[id] || toEpoch(date) > toEpoch(mergedTombstones[id])) {
+      mergedTombstones[id] = date;
+    }
+  }
+
+  // Prune tombstones older than 30 days
+  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  for (const [id, date] of Object.entries(mergedTombstones)) {
+    if (toEpoch(date) < thirtyDaysAgo) {
+      delete mergedTombstones[id];
+    }
+  }
+
+  // Merge goals
+  const goalMap = new Map<string, Goal>();
+  const allGoals = [...local.goals, ...remote.goals];
+
+  for (const goal of allGoals) {
+    const deletedAt = mergedTombstones[goal.id];
+    if (deletedAt && toEpoch(deletedAt) >= toEpoch(goal.updated_at)) {
+      continue;
+    }
+    if (deletedAt && toEpoch(goal.updated_at) > toEpoch(deletedAt)) {
+      delete mergedTombstones[goal.id];
+    }
+
+    const existing = goalMap.get(goal.id);
+    if (!existing || toEpoch(goal.updated_at) > toEpoch(existing.updated_at)) {
+      goalMap.set(goal.id, goal);
+    }
+  }
+
+  // Merge tasks
+  const taskMap = new Map<string, Task>();
+  const allTasks = [...local.tasks, ...remote.tasks];
+
+  for (const task of allTasks) {
+    if (!goalMap.has(task.goal_id)) continue;
+
+    const deletedAt = mergedTombstones[task.id];
+    if (deletedAt && toEpoch(deletedAt) >= toEpoch(task.updated_at)) {
+      continue;
+    }
+    if (deletedAt && toEpoch(task.updated_at) > toEpoch(deletedAt)) {
+      delete mergedTombstones[task.id];
+    }
+
+    const existing = taskMap.get(task.id);
+    if (!existing || toEpoch(task.updated_at) > toEpoch(existing.updated_at)) {
+      taskMap.set(task.id, task);
+    }
+  }
+
+  return {
+    goals: Array.from(goalMap.values()),
+    tasks: Array.from(taskMap.values()),
+    tombstones: mergedTombstones,
+  };
+}
+
 export async function uploadBackup(): Promise<void> {
   if (inFlight) {
     queuedWhileBusy = true;
@@ -85,12 +167,21 @@ export async function uploadBackup(): Promise<void> {
   }
 
   inFlight = (async () => {
-    const [goals, tasks] = await Promise.all([db.goals.toArray(), db.tasks.toArray()]);
+    const [goals, tasks, tombstones] = await Promise.all([
+      db.goals.toArray(),
+      db.tasks.toArray(),
+      db.tombstones.toArray(),
+    ]);
+    const tombstoneMap: Record<string, string> = {};
+    for (const t of tombstones) {
+      tombstoneMap[t.id] = t.deleted_at;
+    }
+
     try {
       const response = await fetch(`${API_BASE}/api/backup`, {
         method: "PUT",
         headers: apiHeaders(),
-        body: JSON.stringify({ goals, tasks }),
+        body: JSON.stringify({ goals, tasks, tombstones: tombstoneMap }),
         keepalive: true,
       });
       if (!response.ok) throw new Error(`Backup failed: ${response.status}`);
@@ -118,6 +209,71 @@ export async function uploadBackup(): Promise<void> {
   }
 }
 
+export async function syncWithRemote(): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE}/api/backup`, { headers: apiHeaders() });
+    if (!response.ok) return false;
+    const body = await response.json();
+    if (!body.exists) {
+      const localCount = await db.goals.count();
+      if (localCount > 0) void uploadBackup();
+      return false;
+    }
+
+    const remoteGoals: Goal[] = (body.goals ?? []).filter(isGoal);
+    const remoteTasks: Task[] = (body.tasks ?? []).filter(isTask);
+    const remoteTombstones: Record<string, string> = body.tombstones ?? {};
+
+    const [localGoals, localTasks, localTombstonesList] = await Promise.all([
+      db.goals.toArray(),
+      db.tasks.toArray(),
+      db.tombstones.toArray(),
+    ]);
+
+    const localTombstones: Record<string, string> = {};
+    for (const t of localTombstonesList) {
+      localTombstones[t.id] = t.deleted_at;
+    }
+
+    const merged = mergeSnapshots(
+      { goals: localGoals, tasks: localTasks, tombstones: localTombstones },
+      { goals: remoteGoals, tasks: remoteTasks, tombstones: remoteTombstones },
+    );
+
+    await db.transaction("rw", db.goals, db.tasks, db.tombstones, db.backup_meta, async () => {
+      await db.goals.clear();
+      await db.tasks.clear();
+      await db.tombstones.clear();
+
+      await db.goals.bulkPut(
+        merged.goals.map((g) => ({
+          ...g,
+          user_id: g.user_id ?? USER_ID,
+          status: g.status === GoalStatus.COMPLETED ? GoalStatus.COMPLETED : GoalStatus.ACTIVE,
+        })),
+      );
+      await db.tasks.bulkPut(
+        merged.tasks.map((t) => ({
+          ...t,
+          user_id: t.user_id ?? USER_ID,
+          status: t.status === TaskStatus.COMPLETED ? TaskStatus.COMPLETED : TaskStatus.PENDING,
+        })),
+      );
+      await db.tombstones.bulkPut(
+        Object.entries(merged.tombstones).map(([id, deleted_at]) => ({ id, deleted_at })),
+      );
+      await setMeta({ saved_at: body.saved_at ?? null, last_error: null });
+    });
+
+    markBackedUp();
+    void uploadBackup();
+    return true;
+  } catch (err) {
+    await setMeta({ last_error: (err as Error).message });
+    return false;
+  }
+}
+
 /** Stop losing edits to a closed tab: a pending backup is flushed on the way out. */
 export function installUnloadFlush(): () => void {
   const flush = () => {
@@ -127,7 +283,7 @@ export function installUnloadFlush(): () => void {
       void uploadBackup();
     }
   };
-  const onOnline = () => void uploadBackup();
+  const onOnline = () => void syncWithRemote();
 
   window.addEventListener("pagehide", flush);
   window.addEventListener("online", onOnline);
@@ -215,4 +371,29 @@ export function flushBackupNow(): void {
   if (uploadTimer) clearTimeout(uploadTimer);
   uploadTimer = null;
   void uploadBackup();
+}
+
+/** Delete cloud snapshot on the server. */
+export async function deleteRemoteBackup(): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/backup`, {
+    method: "DELETE",
+    headers: apiHeaders(),
+  });
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`Failed to delete remote backup: ${response.status}`);
+  }
+}
+
+/** Export entire local store as a formatted JSON document. */
+export async function exportLocalDataJson(): Promise<string> {
+  const [goals, tasks] = await Promise.all([db.goals.toArray(), db.tasks.toArray()]);
+  return JSON.stringify(
+    {
+      goals,
+      tasks,
+      exported_at: new Date().toISOString(),
+    },
+    null,
+    2,
+  );
 }

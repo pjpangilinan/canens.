@@ -204,3 +204,101 @@ describe("uploadBackup", () => {
     expect(await db.goals.count()).toBe(1);
   });
 });
+
+describe("mergeSnapshots (LWW)", () => {
+  it("combines goals created concurrently on two devices", async () => {
+    const { mergeSnapshots } = await import("../lib/backup");
+    const local = {
+      goals: [
+        {
+          id: "g-laptop",
+          user_id: "u",
+          title: "Laptop Goal",
+          status: GoalStatus.ACTIVE,
+          created_at: "2026-09-29T10:00:00.000Z",
+          updated_at: "2026-09-29T10:00:00.000Z",
+        },
+      ],
+      tasks: [],
+    };
+    const remote = {
+      goals: [
+        {
+          id: "g-phone",
+          user_id: "u",
+          title: "Phone Goal",
+          status: GoalStatus.ACTIVE,
+          created_at: "2026-09-29T10:05:00.000Z",
+          updated_at: "2026-09-29T10:05:00.000Z",
+        },
+      ],
+      tasks: [],
+    };
+
+    const merged = mergeSnapshots(local, remote);
+    expect(merged.goals).toHaveLength(2);
+    expect(merged.goals.map((g) => g.title).sort()).toEqual(["Laptop Goal", "Phone Goal"]);
+  });
+
+  it("resolves conflicting edits on same goal with last write wins", async () => {
+    const { mergeSnapshots } = await import("../lib/backup");
+    const local = {
+      goals: [
+        {
+          id: "g1",
+          user_id: "u",
+          title: "Older Title",
+          status: GoalStatus.ACTIVE,
+          created_at: "2026-09-29T10:00:00.000Z",
+          updated_at: "2026-09-29T10:00:00.000Z",
+        },
+      ],
+      tasks: [],
+    };
+    const remote = {
+      goals: [
+        {
+          id: "g1",
+          user_id: "u",
+          title: "Newer Title Wins",
+          status: GoalStatus.ACTIVE,
+          created_at: "2026-09-29T10:00:00.000Z",
+          updated_at: "2026-09-29T10:15:00.000Z",
+        },
+      ],
+      tasks: [],
+    };
+
+    const merged = mergeSnapshots(local, remote);
+    expect(merged.goals).toHaveLength(1);
+    expect(merged.goals[0].title).toBe("Newer Title Wins");
+  });
+
+  it("respects tombstones so deleted goals are not resurrected by remote snapshots", async () => {
+    const { mergeSnapshots } = await import("../lib/backup");
+    const local = {
+      goals: [],
+      tasks: [],
+      tombstones: {
+        g1: "2026-09-29T11:00:00.000Z",
+      },
+    };
+    const remote = {
+      goals: [
+        {
+          id: "g1",
+          user_id: "u",
+          title: "Deleted Goal on Remote",
+          status: GoalStatus.ACTIVE,
+          created_at: "2026-09-29T10:00:00.000Z",
+          updated_at: "2026-09-29T10:30:00.000Z",
+        },
+      ],
+      tasks: [],
+    };
+
+    const merged = mergeSnapshots(local, remote);
+    expect(merged.goals).toHaveLength(0);
+    expect(merged.tombstones["g1"]).toBe("2026-09-29T11:00:00.000Z");
+  });
+});

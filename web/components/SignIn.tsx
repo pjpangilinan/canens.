@@ -38,6 +38,8 @@ export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
+  const [honeypot, setHoneypot] = useState("");
+  const [formMountTime] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -49,6 +51,12 @@ export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
     if (busy) return;
     setError(null);
     setNotice(null);
+
+    if (mode === "signup") {
+      if (honeypot.trim().length > 0 || Date.now() - formMountTime < 400) {
+        return setError("Unable to complete registration. Please try again.");
+      }
+    }
 
     const badEmail = emailProblem(email);
     if (badEmail) return setError(badEmail);
@@ -161,6 +169,20 @@ export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
               {error}
             </p>
           )}
+
+          {/* Honeypot field for bot defense */}
+          <div style={{ position: "absolute", left: "-9999px", opacity: 0, height: 0, width: 0, overflow: "hidden" }} aria-hidden="true">
+            <label htmlFor="signin-website">Website</label>
+            <input
+              id="signin-website"
+              type="text"
+              name="website"
+              tabIndex={-1}
+              autoComplete="off"
+              value={honeypot}
+              onChange={(e) => setHoneypot(e.target.value)}
+            />
+          </div>
 
           {mode !== "confirm" && mode !== "reset" && (
             <div className="space-y-1.5">

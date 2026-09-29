@@ -69,11 +69,18 @@ def today() -> date:
     return datetime.now(timezone.utc).date()
 
 
+def resolve_day(client_date: date | None = None) -> date:
+    utc_today = today()
+    if client_date is not None and abs((client_date - utc_today).days) <= 1:
+        return client_date
+    return utc_today
+
+
 def _counter_key(user_id: uuid.UUID, day: date) -> str:
     return f"{_COUNTER_PREFIX}{user_id}#{day.isoformat()}"
 
 
-def reserve_call(user_id: uuid.UUID) -> int | None:
+def reserve_call(user_id: uuid.UUID, client_date: date | None = None) -> int | None:
     """Claim one call for today. Returns the new count, or None if disabled.
 
     Raises DailyCapReached once today's allowance is spent.
@@ -82,7 +89,7 @@ def reserve_call(user_id: uuid.UUID) -> int | None:
     if limit <= 0:
         return None
 
-    day = today()
+    day = resolve_day(client_date)
     # Two days of grace, so a counter written just before midnight is not
     # deleted while it is still today's.
     expires = int(time.time()) + 2 * 24 * 60 * 60
@@ -108,12 +115,12 @@ def reserve_call(user_id: uuid.UUID) -> int | None:
     return int(response["Attributes"]["calls"])
 
 
-def refund_call(user_id: uuid.UUID) -> None:
+def refund_call(user_id: uuid.UUID, client_date: date | None = None) -> None:
     """Refund one reserved call if the downstream model invocation failed."""
     if settings.ai_daily_cap <= 0:
         return
 
-    day = today()
+    day = resolve_day(client_date)
     try:
         client().update_item(
             Key={"pk": _counter_key(user_id, day)},

@@ -153,5 +153,47 @@ async def test_stored_object_is_json_under_the_configured_bucket(async_client, s
     put = s3.puts[-1]
     assert put["content_type"] == "application/json"
     assert put["bucket"]
-    assert set(put["body"]) == {"goals", "tasks", "saved_at"}
+    assert set(put["body"]) == {"goals", "tasks", "saved_at", "tombstones"}
+
+
+async def test_delete_backup_removes_snapshot(async_client, s3):
+    await async_client.put(
+        "/api/backup", json={"goals": [{"id": GOAL_ID, "title": "To Delete"}], "tasks": []}
+    )
+    assert KEY in s3.objects
+
+    response = await async_client.delete("/api/backup")
+    assert response.status_code == 204
+    assert KEY not in s3.objects
+
+    # Subsequent GET returns exists: False
+    get_res = await async_client.get("/api/backup")
+    assert get_res.json()["exists"] is False
+
+
+async def test_export_backup_returns_data(async_client):
+    await async_client.put(
+        "/api/backup", json={"goals": [{"id": GOAL_ID, "title": "Exported Goal"}], "tasks": []}
+    )
+    response = await async_client.get("/api/backup/export")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["goals"][0]["title"] == "Exported Goal"
+    assert "exported_at" in body
+
+
+async def test_backup_persists_and_returns_tombstones(async_client):
+    response = await async_client.put(
+        "/api/backup",
+        json={
+            "goals": [{"id": GOAL_ID, "title": "Goal"}],
+            "tasks": [],
+            "tombstones": {"deleted-task-1": "2026-09-29T12:00:00Z"},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["tombstones"] == {"deleted-task-1": "2026-09-29T12:00:00Z"}
+
+    get_res = await async_client.get("/api/backup")
+    assert get_res.json()["tombstones"] == {"deleted-task-1": "2026-09-29T12:00:00Z"}
 

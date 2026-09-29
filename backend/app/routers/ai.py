@@ -1,6 +1,8 @@
+import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.deps import enforce_daily_ai_cap, require_user
@@ -65,6 +67,34 @@ def next_steps(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return NextStepsResponse(status=result["status"], tasks=result["tasks"])
+
+
+@router.post(
+    "/goals/next-steps/stream",
+    dependencies=[Depends(enforce_daily_ai_cap)],
+)
+def next_steps_stream(
+    req: NextStepsRequest, user_id: uuid.UUID = Depends(require_user)
+) -> StreamingResponse:
+    def event_stream():
+        try:
+            for event in bedrock.next_steps_stream(
+                req.goal_title,
+                [t.model_dump() for t in req.existing_tasks],
+            ):
+                if event["type"] == "token":
+                    yield f"event: token\ndata: {json.dumps({'text': event['text']})}\n\n"
+                elif event["type"] == "done":
+                    yield f"event: done\ndata: {json.dumps({'status': event['status'], 'tasks': event['tasks']})}\n\n"
+        except ProviderError as exc:
+            refund_call(user_id)
+            yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post(

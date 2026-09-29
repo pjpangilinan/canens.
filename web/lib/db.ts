@@ -43,10 +43,16 @@ export interface BackupMeta {
   last_error: string | null;
 }
 
+export interface Tombstone {
+  id: string;
+  deleted_at: string;
+}
+
 export const db = new Dexie("CanensLocalDB") as Dexie & {
   goals: EntityTable<Goal, "id">;
   tasks: EntityTable<Task, "id">;
   backup_meta: EntityTable<BackupMeta, "id">;
+  tombstones: EntityTable<Tombstone, "id">;
 };
 
 /**
@@ -90,6 +96,13 @@ db.version(4)
     await tx.table("goals").toCollection().modify(normalise);
     await tx.table("tasks").toCollection().modify(normalise);
   });
+
+db.version(5).stores({
+  goals: "id, user_id, status, created_at",
+  tasks: "id, user_id, goal_id, status",
+  backup_meta: "id",
+  tombstones: "id, deleted_at",
+});
 
 /**
  * The local record owner.

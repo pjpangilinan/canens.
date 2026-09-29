@@ -110,6 +110,17 @@ describe("the action request", () => {
     const body = JSON.parse(String(lastRequest!.init.body));
     expect(body.AccessToken).toBe("access-token-xyz");
   });
+
+  it("calls DeleteUser with access token", async () => {
+    respondWith({});
+    const { deleteAccount } = await import("../lib/auth");
+    await deleteAccount("access-token-xyz");
+
+    const headers = lastRequest!.init.headers as Record<string, string>;
+    expect(headers["X-Amz-Target"]).toBe("AWSCognitoIdentityProviderService.DeleteUser");
+    const body = JSON.parse(String(lastRequest!.init.body));
+    expect(body.AccessToken).toBe("access-token-xyz");
+  });
 });
 
 describe("error translation", () => {
@@ -212,5 +223,20 @@ describe("emailProblem", () => {
 
   it("accepts an ordinary address", () => {
     expect(emailProblem("someone@example.com")).toBeNull();
+  });
+});
+
+describe("signup velocity", () => {
+  it("allows up to 3 sign-up attempts and then blocks further attempts", async () => {
+    localStorage.removeItem("canens.signup_attempts");
+    const { checkSignupVelocity, recordSignupAttempt } = await import("../lib/auth");
+    
+    expect(() => checkSignupVelocity()).not.toThrow();
+    recordSignupAttempt();
+    expect(() => checkSignupVelocity()).not.toThrow();
+    recordSignupAttempt();
+    expect(() => checkSignupVelocity()).not.toThrow();
+    recordSignupAttempt();
+    expect(() => checkSignupVelocity()).toThrow("Too many sign-up attempts");
   });
 });

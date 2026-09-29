@@ -182,7 +182,41 @@ function toSession(result: AuthResult): Session {
   };
 }
 
+const SIGNUP_VELOCITY_KEY = "canens.signup_attempts";
+const MAX_SIGNUP_ATTEMPTS = 3;
+const SIGNUP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
+export function checkSignupVelocity(): void {
+  try {
+    const raw = localStorage.getItem(SIGNUP_VELOCITY_KEY);
+    const now = Date.now();
+    const attempts: number[] = raw ? JSON.parse(raw) : [];
+    const recent = attempts.filter((t) => typeof t === "number" && now - t < SIGNUP_WINDOW_MS);
+    if (recent.length >= MAX_SIGNUP_ATTEMPTS) {
+      throw new AuthError(
+        "LimitExceededException",
+        "Too many sign-up attempts. Please wait a few minutes before trying again.",
+      );
+    }
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+  }
+}
+
+export function recordSignupAttempt(): void {
+  try {
+    const raw = localStorage.getItem(SIGNUP_VELOCITY_KEY);
+    const now = Date.now();
+    const attempts: number[] = raw ? JSON.parse(raw) : [];
+    const recent = attempts.filter((t) => typeof t === "number" && now - t < SIGNUP_WINDOW_MS);
+    recent.push(now);
+    localStorage.setItem(SIGNUP_VELOCITY_KEY, JSON.stringify(recent));
+  } catch {}
+}
+
 export function createAccount(email: string, password: string): Promise<void> {
+  checkSignupVelocity();
+  recordSignupAttempt();
   return action("SignUp", {
     ClientId: COGNITO_CLIENT_ID,
     Username: email,
@@ -224,6 +258,12 @@ export function confirmForgotPassword(
 
 export function globalSignOut(accessToken: string): Promise<void> {
   return action("GlobalSignOut", {
+    AccessToken: accessToken,
+  }).then(() => undefined);
+}
+
+export function deleteAccount(accessToken: string): Promise<void> {
+  return action("DeleteUser", {
     AccessToken: accessToken,
   }).then(() => undefined);
 }

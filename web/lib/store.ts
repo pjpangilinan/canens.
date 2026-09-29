@@ -58,9 +58,15 @@ export async function reopenGoal(goalId: string): Promise<void> {
 
 /** Deleting a goal removes its tasks too. Archiving is the reversible option. */
 export async function deleteGoal(goalId: string): Promise<void> {
-  await db.transaction("rw", db.goals, db.tasks, async () => {
+  const timestamp = now();
+  await db.transaction("rw", db.goals, db.tasks, db.tombstones, async () => {
+    const taskIds = (await db.tasks.where("goal_id").equals(goalId).toArray()).map((t) => t.id);
     await db.tasks.where("goal_id").equals(goalId).delete();
     await db.goals.delete(goalId);
+    await db.tombstones.bulkPut([
+      { id: goalId, deleted_at: timestamp },
+      ...taskIds.map((id) => ({ id, deleted_at: timestamp })),
+    ]);
   });
 }
 export async function createTask(goalId: string, title: string): Promise<Task> {
@@ -98,7 +104,11 @@ export async function renameTask(taskId: string, title: string): Promise<Task> {
 }
 
 export async function deleteTask(taskId: string): Promise<void> {
-  await db.tasks.delete(taskId);
+  const timestamp = now();
+  await db.transaction("rw", db.tasks, db.tombstones, async () => {
+    await db.tasks.delete(taskId);
+    await db.tombstones.put({ id: taskId, deleted_at: timestamp });
+  });
 }
 
 /**
@@ -185,4 +195,8 @@ export async function tasksForGoals(
 
 export async function isStoreEmpty(): Promise<boolean> {
   return (await db.goals.count()) === 0;
+}
+
+export async function clearAllData(): Promise<void> {
+  await Promise.all([db.goals.clear(), db.tasks.clear(), db.tombstones.clear()]);
 }

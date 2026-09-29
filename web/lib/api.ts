@@ -84,6 +84,87 @@ export function fetchNextSteps(
   });
 }
 
+export async function streamNextSteps(
+  goalTitle: string,
+  existingTasks: { title: string; status: string }[],
+  onToken?: (text: string) => void,
+): Promise<NextStepsResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}/api/goals/next-steps/stream`, {
+      method: "POST",
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        goal_title: goalTitle,
+        existing_tasks: existingTasks,
+      }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ApiError("The request timed out. Try again.", 0);
+    }
+    return fetchNextSteps(goalTitle, existingTasks);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok || !response.body) {
+    return fetchNextSteps(goalTitle, existingTasks);
+  }
+
+  try {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalResult: NextStepsResult | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split("\n\n");
+      buffer = blocks.pop() ?? "";
+
+      for (const block of blocks) {
+        const lines = block.split("\n");
+        let event = "";
+        let data = "";
+        for (const line of lines) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          if (line.startsWith("data:")) data = line.slice(5).trim();
+        }
+        if (!data) continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          if (event === "token" && parsed.text) {
+            onToken?.(parsed.text);
+          } else if (event === "done") {
+            finalResult = {
+              status: parsed.status === "done" ? "done" : "more",
+              tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
+            };
+          } else if (event === "error") {
+            throw new ApiError(parsed.detail ?? "Stream failed", response.status);
+          }
+        } catch (e) {
+          if (e instanceof ApiError) throw e;
+        }
+      }
+    }
+
+    if (finalResult) return finalResult;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+  }
+
+  return fetchNextSteps(goalTitle, existingTasks);
+}
+
 export function fetchStarterGoals(answers: string, count = 4): Promise<{ goals: string[] }> {
   return post<{ goals: string[] }>("/api/onboarding/starter-goals", {
     answers,

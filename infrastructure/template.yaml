@@ -390,9 +390,8 @@ Resources:
               Action:
                 - s3:GetObject
                 - s3:PutObject
-              # Only the snapshots prefix, and only this bucket. The list is a
-              # grant, not a condition, so the role cannot be used to list or
-              # delete anything.
+                - s3:DeleteObject
+              # Only the snapshots prefix, and only this bucket.
               Resource: !Sub "${SnapshotBucket.Arn}/snapshots/*"
             - Sid: SnapshotPrefixListing
               Effect: Allow

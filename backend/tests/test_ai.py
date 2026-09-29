@@ -26,6 +26,17 @@ class _StubBedrock:
             raise self._error
         return self._result
 
+    def next_steps_stream(self, goal_title, existing_tasks):
+        self.calls.append((goal_title, existing_tasks))
+        if self._error:
+            raise self._error
+        yield {"type": "token", "text": "Drafting "}
+        yield {
+            "type": "done",
+            "status": self._result.get("status", "more"),
+            "tasks": self._result.get("tasks", []),
+        }
+
     def starter_goals(self, answers, count=4):
         self.calls.append((answers, count))
         if self._error:
@@ -221,3 +232,29 @@ class TestDailyCap:
         expression = update["UpdateExpression"]
         assert "expires" in expression, expression
         assert int(update["ExpressionAttributeValues"][":expires"]) > 0
+
+    async def test_usage_records_against_client_local_date(
+        self, async_client, stub, dynamodb
+    ):
+        stub({"status": "more", "tasks": ["Step"]})
+        await async_client.post(
+            "/api/goals/next-steps",
+            json={"goal_title": "Anything"},
+            headers={"X-Canens-Date": "2026-09-30"},
+        )
+
+        assert len(dynamodb.updates) == 1
+        update = dynamodb.updates[0]
+        assert update["Key"]["pk"].endswith("#2026-09-30")
+
+    async def test_next_steps_stream_yields_sse(self, async_client, stub):
+        stub({"status": "more", "tasks": ["Streaming Step 1", "Streaming Step 2"]})
+        response = await async_client.post(
+            "/api/goals/next-steps/stream",
+            json={"goal_title": "Build a rocket"},
+        )
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
+        body = response.text
+        assert "event: done" in body
+        assert "Streaming Step 1" in body

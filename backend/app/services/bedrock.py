@@ -11,6 +11,7 @@ hardcoded placeholder task. That fallback was a reasonable shortcut on a
 flat-rate API key; on per-token billing it hides both the cost and the
 failure, so a provider error now propagates.
 """
+import json
 import logging
 
 import boto3
@@ -271,6 +272,124 @@ class BedrockClient:
         if not tasks:
             raise ProviderError("The model asked for more steps but returned none")
         return {"status": "more", "tasks": tasks}
+
+    def _call_tool_stream(
+        self,
+        *,
+        tool_name: str,
+        tool_description: str,
+        schema: dict,
+        system_prompt: str,
+        user_prompt: str,
+    ):
+        try:
+            response = self.client.converse_stream(
+                modelId=settings.bedrock_model_id,
+                system=[{"text": system_prompt}],
+                messages=[{"role": "user", "content": [{"text": user_prompt}]}],
+                toolConfig={
+                    "tools": [
+                        {
+                            "toolSpec": {
+                                "name": tool_name,
+                                "description": tool_description,
+                                "inputSchema": schema,
+                            }
+                        }
+                    ],
+                    "toolChoice": {"tool": {"name": tool_name}},
+                },
+                inferenceConfig={
+                    "temperature": 0.1,
+                    "maxTokens": settings.bedrock_max_tokens,
+                },
+            )
+        except (ClientError, BotoCoreError, AttributeError) as exc:
+            logger.warning("Bedrock converse_stream unavailable or failed: %s", exc)
+            fallback = self._call_tool(
+                tool_name=tool_name,
+                tool_description=tool_description,
+                schema=schema,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            yield {"type": "result", "result": fallback}
+            return
+
+        accumulated: list[str] = []
+        stop_reason = None
+        stream = response.get("stream", [])
+        try:
+            for event in stream:
+                if "contentBlockDelta" in event:
+                    delta = event["contentBlockDelta"].get("delta", {})
+                    if "toolUse" in delta:
+                        chunk = delta["toolUse"].get("input", "")
+                        if chunk:
+                            accumulated.append(chunk)
+                            yield {"type": "token", "text": chunk}
+                    elif "text" in delta:
+                        chunk = delta.get("text", "")
+                        if chunk:
+                            yield {"type": "token", "text": chunk}
+                elif "messageStop" in event:
+                    stop_reason = event["messageStop"].get("stopReason")
+        except Exception as exc:
+            logger.warning("Error consuming converse stream: %s", exc)
+
+        if stop_reason == STOP_REASON_MAX_TOKENS:
+            raise ProviderError(
+                "The model ran out of output tokens before it finished. "
+                "Raise BEDROCK_MAX_TOKENS."
+            )
+
+        raw_str = "".join(accumulated).strip()
+        if raw_str:
+            try:
+                parsed = json.loads(raw_str)
+                yield {"type": "result", "result": self._as_object(parsed)}
+                return
+            except Exception:
+                pass
+
+        fallback = self._call_tool(
+            tool_name=tool_name,
+            tool_description=tool_description,
+            schema=schema,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        yield {"type": "result", "result": fallback}
+
+    def next_steps_stream(self, goal_title: str, existing_tasks: list[dict]):
+        """Stream next actions proposal. Yields tokens and final {status, tasks}."""
+        context = "\n".join(
+            f"- {t.get('title', '')} [{t.get('status', 'Pending')}]" for t in existing_tasks
+        )
+        user_prompt = (
+            f"Goal: {goal_title}\n\n"
+            f"Steps the user has already recorded:\n{context or '- none'}\n\n"
+            f"Propose the next {MIN_TASKS} to {MAX_TASKS} steps, or report the goal as done."
+        )
+
+        for event in self._call_tool_stream(
+            tool_name=NEXT_STEPS_TOOL,
+            tool_description="Report the next steps for a goal, or that the goal is done.",
+            schema=_NEXT_STEPS_SCHEMA,
+            system_prompt=NEXT_STEPS_PROMPT,
+            user_prompt=user_prompt,
+        ):
+            if event["type"] == "token":
+                yield {"type": "token", "text": event["text"]}
+            elif event["type"] == "result":
+                res = event["result"]
+                status = res.get("status")
+                if status not in ("more", "done"):
+                    status = "more"
+                tasks = self._titles(res.get("tasks", []), MAX_TASKS)
+                if status == "more" and not tasks:
+                    status = "done"
+                yield {"type": "done", "status": status, "tasks": tasks}
 
     def starter_goals(self, answers: str, count: int = 4) -> dict:
         """Suggest goals for a new user. Returns {"goals": [title]}."""

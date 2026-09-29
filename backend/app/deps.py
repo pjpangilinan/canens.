@@ -1,3 +1,4 @@
+from datetime import date
 import uuid
 
 from fastapi import Depends, Header, HTTPException, Response, status
@@ -33,6 +34,7 @@ async def require_user(
 def enforce_daily_ai_cap(
     response: Response,
     user_id: uuid.UUID = Depends(require_user),
+    x_canens_date: str | None = Header(default=None),
 ) -> None:
     """Reserve one model call, refusing once today's allowance is spent.
 
@@ -46,8 +48,15 @@ def enforce_daily_ai_cap(
     event loop for the length of the DynamoDB round trip.
     """
     limit = settings.ai_daily_cap
+    client_date: date | None = None
+    if x_canens_date:
+        try:
+            client_date = date.fromisoformat(x_canens_date.strip())
+        except (ValueError, TypeError):
+            client_date = None
+
     try:
-        calls = reserve_call(user_id)
+        calls = reserve_call(user_id, client_date=client_date)
         if calls is not None and limit > 0:
             response.headers["X-RateLimit-Limit"] = str(limit)
             response.headers["X-RateLimit-Remaining"] = str(max(0, limit - calls))

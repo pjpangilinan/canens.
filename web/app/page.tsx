@@ -52,5 +52,10 @@ export default function Page() {
     return <SignIn onSignedIn={recheck} />;
   }
 
-  return <Home onSignOut={signOut} signedInAs={session?.email ?? ""} />;
+  return (
+    <Home
+      onSignOut={signOut}
+      signedInAs={session?.email || (status === "unconfigured" ? "Local preview" : null)}
+    />
+  );
 }

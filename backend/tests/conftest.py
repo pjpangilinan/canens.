@@ -56,6 +56,10 @@ class FakeS3:
                           "content_type": ContentType})
         return {}
 
+    def delete_object(self, Bucket, Key, **kwargs):  # noqa: N803
+        self.objects.pop(Key, None)
+        return {}
+
 
 class FakeDynamoDB:
     """A conditional counter, and the parameters seen.

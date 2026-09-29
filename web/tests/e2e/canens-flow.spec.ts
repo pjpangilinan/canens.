@@ -276,4 +276,20 @@ test.describe("Canens", () => {
     await page.getByRole("button", { name: `Delete "${goalTitle}"` }).click();
     await expect(page.getByRole("heading", { name: goalTitle })).toBeHidden();
   });
+
+  test("account options: export data and delete account confirmation modal", async ({ page }) => {
+    await expect(page.getByRole("button", { name: "Export data (JSON)" })).toBeVisible();
+
+    // Verify export triggers download event
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export data (JSON)" }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toMatch(/^canens-backup-.*\.json$/);
+
+    // Verify Delete Account modal opens and cancels
+    await page.getByRole("button", { name: "Delete account" }).click();
+    await expect(page.getByRole("heading", { name: "Delete Account and Data?" })).toBeVisible();
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect(page.getByRole("heading", { name: "Delete Account and Data?" })).toBeHidden();
+  });
 });

@@ -11,7 +11,15 @@ import BackupStatus from "./BackupStatus";
 import { GoalWithTasks } from "../lib/db";
 import { searchGoals } from "../lib/search";
 import * as store from "../lib/store";
-import { restoreIfEmpty, installUnloadFlush, scheduleBackup } from "../lib/backup";
+import {
+  restoreIfEmpty,
+  installUnloadFlush,
+  scheduleBackup,
+  exportLocalDataJson,
+  deleteRemoteBackup,
+  syncWithRemote,
+} from "../lib/backup";
+import { deleteAccount, readSession } from "../lib/auth";
 
 export default function Home({
   onSignOut,
@@ -25,6 +33,8 @@ export default function Home({
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [restored, setRestored] = useState(false);
   const [canRestore, setCanRestore] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     // Inline rather than via a callback: the restore result arrives later, and
@@ -35,6 +45,10 @@ export default function Home({
         if (cancelled) return;
         if (outcome === "restored") setRestored(true);
         if (outcome === "declined-because-previously-synced") setCanRestore(true);
+        if (outcome === "nothing-to-restore") {
+          // If store is not empty, run LWW sync with remote
+          void syncWithRemote();
+        }
       })
       .catch((err: Error) => {
         if (!cancelled) setRestoreError(err.message);
@@ -55,6 +69,39 @@ export default function Home({
       setRestoreError((err as Error).message);
     }
   }, []);
+
+  const handleExport = useCallback(async () => {
+    try {
+      const json = await exportLocalDataJson();
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `canens-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(`Export failed: ${(err as Error).message}`);
+    }
+  }, []);
+
+  const handleDeleteAccount = useCallback(async () => {
+    setIsDeleting(true);
+    try {
+      await deleteRemoteBackup().catch(() => {});
+      const session = readSession();
+      if (session?.accessToken) {
+        await deleteAccount(session.accessToken);
+      }
+      await store.clearAllData();
+      localStorage.clear();
+      onSignOut();
+    } catch (err) {
+      setError(`Account deletion failed: ${(err as Error).message}`);
+      setIsDeleting(false);
+      setShowDeleteModal(false);
+    }
+  }, [onSignOut]);
 
   // A 2s debounce means the last edit before closing the tab was otherwise
   // never uploaded, and a failed upload was never retried without another
@@ -93,17 +140,61 @@ export default function Home({
             Break a goal into the next few actions.
           </p>
           {signedInAs && (
-            <div className="flex items-center justify-center gap-3 pt-2 text-xs text-muted/70">
+            <div className="flex flex-wrap items-center justify-center gap-3 pt-2 text-xs text-muted/70">
               <span className="truncate max-w-[16rem]">{signedInAs}</span>
+              <span>•</span>
+              <button
+                onClick={() => void handleExport()}
+                className="underline hover:text-foreground shrink-0"
+              >
+                Export data (JSON)
+              </button>
+              <span>•</span>
               <button
                 onClick={onSignOut}
                 className="underline hover:text-foreground shrink-0"
               >
                 Sign out
               </button>
+              <span>•</span>
+              <button
+                onClick={() => setShowDeleteModal(true)}
+                className="underline text-red-400/80 hover:text-red-300 shrink-0"
+              >
+                Delete account
+              </button>
             </div>
           )}
         </header>
+
+        {showDeleteModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+            <div className="bg-surface border border-red-500/30 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-glass">
+              <h3 className="text-lg font-bold text-foreground">Delete Account and Data?</h3>
+              <p className="text-sm text-muted">
+                This will permanently delete your Cognito account, wipe all cloud backups, and clear your local goals and steps. This action cannot be undone.
+              </p>
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  disabled={isDeleting}
+                  onClick={() => setShowDeleteModal(false)}
+                  className="px-4 py-2 rounded-lg text-sm font-medium text-foreground/80 hover:text-foreground border border-surface-border hover:bg-surface-elevated"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isDeleting}
+                  onClick={() => void handleDeleteAccount()}
+                  className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-500 text-white disabled:opacity-50"
+                >
+                  {isDeleting ? "Deleting..." : "Permanently Delete"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <GoalInput
           onSubmit={async (title) => {

@@ -17,6 +17,10 @@ describe("apiHeaders", () => {
     expect(apiHeaders()["Content-Type"]).toBe("application/json");
   });
 
+  it("sends user local date in X-Canens-Date", () => {
+    expect(apiHeaders()["X-Canens-Date"]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
   it("omits Authorization when there is no token", () => {
     expect(apiHeaders()).not.toHaveProperty("Authorization");
   });
