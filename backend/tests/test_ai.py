@@ -236,16 +236,19 @@ class TestDailyCap:
     async def test_usage_records_against_client_local_date(
         self, async_client, stub, dynamodb
     ):
+        from datetime import timedelta
+        from app.services.usage import today
+        client_date = (today() - timedelta(days=1)).isoformat()
         stub({"status": "more", "tasks": ["Step"]})
         await async_client.post(
             "/api/goals/next-steps",
             json={"goal_title": "Anything"},
-            headers={"X-Canens-Date": "2026-09-30"},
+            headers={"X-Canens-Date": client_date},
         )
 
         assert len(dynamodb.updates) == 1
         update = dynamodb.updates[0]
-        assert update["Key"]["pk"].endswith("#2026-09-30")
+        assert update["Key"]["pk"].endswith(f"#{client_date}")
 
     async def test_next_steps_stream_yields_sse(self, async_client, stub):
         stub({"status": "more", "tasks": ["Streaming Step 1", "Streaming Step 2"]})
